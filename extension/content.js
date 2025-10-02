@@ -107,6 +107,10 @@ class TimelineManager {
             }
             parent = parent.parentElement;
         }
+        if (!this.scrollContainer) {
+            // Fallback to document scrolling element if no explicit overflow container is found
+            this.scrollContainer = document.scrollingElement || document.documentElement || document.body;
+        }
         return this.scrollContainer !== null;
     }
     
@@ -197,7 +201,8 @@ class TimelineManager {
         this.perfStart('recalc');
         if (!this.conversationContainer || !this.ui.timelineBar || !this.scrollContainer) return;
 
-        const userTurnElements = this.conversationContainer.querySelectorAll('article[data-turn="user"]');
+        // Support multiple site schemas: prefer data-turn, fallback to data-message-author-role
+        const userTurnElements = this.conversationContainer.querySelectorAll('article[data-turn="user"], article[data-message-author-role="user"]');
         // Reset visible window to avoid cleaning with stale indices after rebuild
         this.visibleRange = { start: 0, end: -1 };
         // If the conversation is transiently empty (branch switching), don't wipe UI immediately
@@ -356,7 +361,8 @@ class TimelineManager {
         if (!this.intersectionObserver || !this.conversationContainer) return;
         this.intersectionObserver.disconnect();
         this.visibleUserTurns.clear();
-        const userTurns = this.conversationContainer.querySelectorAll('article[data-turn="user"][data-turn-id]');
+        // Observe user turn elements across attribute variants
+        const userTurns = this.conversationContainer.querySelectorAll('article[data-turn="user"][data-turn-id], article[data-message-author-role="user"][data-turn-id]');
         userTurns.forEach(el => this.intersectionObserver.observe(el));
     }
 
