@@ -156,13 +156,3 @@ zip -r ../chatgpt-timeline.xpi *
 ### 支持其他 ChatGPT 模式
 - 向查询添加新选择器，如第 205、365 行
 - 使用不同的对话页面变体进行测试
-
-## 浏览器差异
-
-| 特性 | Chrome/Edge | Firefox |
-|------|-------------|---------|
-| Manifest 版本 | V3 | V2 |
-| 扩展 ID | 自动生成 | 在 manifest 中指定（`chatgpt-timeline@example.com`）|
-| 图标 | 非必需 | 必需（`icon.svg`）|
-| 权限 | 隐式 | 显式（`activeTab`）|
-| run_at | 默认（document_idle）| 显式（document_end）|
