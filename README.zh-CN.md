@@ -28,6 +28,16 @@
 
 > 安装成功后，打开 ChatGPT 会话页面（例如 chat.openai.com/c/...），即可看到页面右侧出现对话时间轴。
 
+## 🧩 如何安装（适用于 Firefox 浏览器）
+
+1. 下载本项目并找到 `chatgpt-timeline.xpi` 文件
+2. 打开 Firefox 浏览器，访问：`about:debugging`
+3. 点击「此 Firefox」选项卡
+4. 点击「临时加载附加组件...」
+5. 选择项目中的 `chatgpt-timeline.xpi` 文件进行加载
+
+> 安装成功后，打开 ChatGPT 会话页面（例如 chat.openai.com/c/...），即可看到页面右侧出现对话时间轴。
+
 
 ## 🙏 致谢
 
