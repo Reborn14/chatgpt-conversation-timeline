@@ -28,6 +28,16 @@ This extension adds an interactive timeline bar to your ChatGPT conversation pag
 
 > After installation, open any ChatGPT conversation and the timeline will appear on the right.
 
+## 🧩 How to Install (For Firefox Browser)
+
+1. Download this project and locate the chatgpt-timeline.xpi file
+2. Open the Firefox browser and go to: about:debugging
+3. Click on the "This Firefox" tab
+4. Click "Load Temporary Add-on..."
+5. Select the chatgpt-timeline.xpi file from the project to load it
+
+> After installation, open any ChatGPT conversation and the timeline will appear on the right.
+
 ## 🙏 Acknowledgement
 
 Inspired by the clean and efficient timeline navigation interface from **Google AI Studio**.  
