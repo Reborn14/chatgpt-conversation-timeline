@@ -1,0 +1,304 @@
+:root {
+    --timeline-dot-color: #D1D5DB; /* Light mode gray */
+    --timeline-dot-active-color: #10A37F; /* ChatGPT's primary green */
+
+    /* AI Studio-like tooltip tokens (light) */
+    --timeline-tooltip-bg: #FFFFFF;
+    --timeline-tooltip-text: #1F2937; /* slate-800 */
+    --timeline-tooltip-border: #E5E7EB; /* gray-200 */
+    --timeline-tooltip-radius: 12px;
+    --timeline-tooltip-shadow: 0 4px 14px rgba(0,0,0,0.10), 0 1px 2px rgba(0,0,0,0.06);
+    /* geometry */
+    --timeline-tooltip-lh: 18px;
+    --timeline-tooltip-pad-y: 10px;
+    --timeline-tooltip-pad-x: 12px;
+    --timeline-tooltip-border-w: 1px;
+    --timeline-tooltip-arrow-size: 8px; /* square side before rotation */
+    --timeline-tooltip-arrow-outside: 4px; /* how much arrow protrudes outside */
+    --timeline-tooltip-anim-in: 120ms cubic-bezier(0, 0, 0.2, 1);
+    --timeline-tooltip-anim-out: 100ms linear;
+
+    --timeline-bar-bg: rgba(240, 240, 240, 0.8);
+    --timeline-dot-size: 12px;
+    --timeline-active-ring: 3px;
+    --timeline-track-padding: 16px;
+    --timeline-tooltip-max: 288px;
+    --timeline-min-gap: 24px;
+    /* enlarged hit area for easier clicking */
+    --timeline-hit-size: 30px;
+    /* spacing model */
+    --timeline-tooltip-gap-visual: 8px;  /* arrow tip to dot */
+    --timeline-tooltip-gap-box: 4px;     /* rectangle edge to timeline */
+}
+
+/* Override variables when ChatGPT's dark mode is active */
+html.dark {
+    --timeline-dot-color: #555555;
+    --timeline-dot-active-color: #19C37D;
+    /* Dark tooltip palette */
+    --timeline-tooltip-bg: #2B2B2B;
+    --timeline-tooltip-text: #EAEAEA;
+    --timeline-tooltip-border: #3A3A3A;
+    --timeline-bar-bg: rgba(50, 50, 50, 0.8);
+}
+
+.chatgpt-timeline-bar {
+    position: fixed;
+    top: 60px; /* Position below the main header */
+    right: 15px;
+    width: 24px;
+    height: calc(100vh - 100px); /* Avoid overlapping the bottom input area */
+    z-index: 2147483646; /* ensure above site chrome */
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    border-radius: 10px;
+    background-color: var(--timeline-bar-bg);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+    transition: background-color 0.3s ease;
+    overflow: visible;
+    /* Isolate layout/paint to reduce reflow propagation during updates */
+    contain: layout paint;
+}
+
+/* Scrollable track to host all dots (long canvas) */
+.timeline-track {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    overflow-y: auto; /* programmatic scroll in Linked mode */
+}
+
+/* Inner content whose height reflects conversation length */
+.timeline-track-content {
+    position: relative;
+    width: 100%;
+    height: 100%; /* updated by JS when needed */
+}
+
+.timeline-dot {
+    position: absolute;
+    left: 50%;
+    /* Use normalized position `--n` mapped to track with padding */
+    top: calc(
+      var(--timeline-track-padding)
+      + (100% - 2 * var(--timeline-track-padding)) * var(--n, 0)
+    );
+    transform: translate(-50%, -50%);
+    width: var(--timeline-hit-size);   /* enlarged hit area */
+    height: var(--timeline-hit-size);  /* enlarged hit area */
+    background: transparent;           /* visible dot drawn via ::after */
+    border: none;
+    cursor: pointer;
+    padding: 0;
+}
+
+.timeline-dot::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: var(--timeline-dot-size);
+    height: var(--timeline-dot-size);
+    transform: translate(-50%, -50%);
+    border-radius: 50%;
+    background-color: var(--timeline-dot-color);
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+/* .timeline-dot::before {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: var(--timeline-dot-size);
+    height: var(--timeline-dot-size);
+    transform: translate(-50%, -50%);
+    border-radius: 50%;
+    background-color: var(--timeline-dot-color);
+    box-shadow: inset 0 0 0 1px var(--timeline-dot-separator);
+} */
+
+/* Enhance visibility and interaction feedback on hover */
+.timeline-dot:hover::after { transform: translate(-50%, -50%) scale(1.15); }
+/* Keyboard accessibility: visible focus ring */
+.timeline-dot:focus-visible::after {
+    box-shadow: 0 0 6px var(--timeline-dot-active-color);
+}
+/* Style for the currently active dot */
+.timeline-dot.active::after {
+    box-shadow: 0 0 0 var(--timeline-active-ring) var(--timeline-dot-active-color), 0 0 6px var(--timeline-dot-active-color);
+}
+
+/* Floating tooltip element */
+.timeline-tooltip {
+    position: fixed;
+    max-width: var(--timeline-tooltip-max);
+    background-color: var(--timeline-tooltip-bg);
+    color: var(--timeline-tooltip-text);
+    padding: var(--timeline-tooltip-pad-y) var(--timeline-tooltip-pad-x);
+    border-radius: var(--timeline-tooltip-radius);
+    border: var(--timeline-tooltip-border-w) solid var(--timeline-tooltip-border);
+    font-size: 12px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: var(--timeline-tooltip-lh); /* integer px to avoid half-line bleed */
+    /* exactly 3 lines + paddings + borders */
+    max-height: calc(
+      3 * var(--timeline-tooltip-lh)
+      + 2 * var(--timeline-tooltip-pad-y)
+      + 2 * var(--timeline-tooltip-border-w)
+    );
+    box-shadow: var(--timeline-tooltip-shadow);
+    pointer-events: none;
+    z-index: 2147483647;
+    /* Clamp to 3 lines; ellipsis only at end */
+    display: -webkit-box;
+    display: -moz-box;
+    display: box;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    -webkit-box-orient: vertical;
+    -moz-box-orient: vertical;
+    box-orient: vertical;
+    overflow: hidden;
+    word-break: break-word;
+    /* Animation base */
+    opacity: 0;
+    will-change: opacity, transform;
+    transition: opacity var(--timeline-tooltip-anim-in);
+}
+
+/* Visible state toggled by JS */
+.timeline-tooltip.visible {
+    opacity: 1;
+    animation: timeline-tooltip-in var(--timeline-tooltip-anim-in);
+}
+
+/* Respect reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  .timeline-tooltip,
+  .timeline-tooltip.visible {
+    transition: opacity 120ms linear;
+    transform: none !important;
+  }
+}
+
+/* Placement-aware transform origin for subtle scale */
+.timeline-tooltip[data-placement="left"] { transform-origin: right center; }
+.timeline-tooltip[data-placement="right"] { transform-origin: left center; }
+
+@keyframes timeline-tooltip-in {
+  from { transform: scale(0.96); }
+  to { transform: scale(1); }
+}
+
+/* Arrow (diamond) using rotated square; inherits colors */
+.timeline-tooltip::after {
+    content: '';
+    position: absolute;
+    width: var(--timeline-tooltip-arrow-size);
+    height: var(--timeline-tooltip-arrow-size);
+    background: var(--timeline-tooltip-bg);
+    border: var(--timeline-tooltip-border-w) solid var(--timeline-tooltip-border);
+    transform: rotate(45deg);
+}
+
+.timeline-tooltip[data-placement="left"]::after {
+    right: calc(-1 * var(--timeline-tooltip-arrow-outside));
+    top: 50%;
+    transform: translateY(-50%) rotate(45deg);
+    border-left: none; /* visually merge with tooltip border */
+    border-bottom: none;
+}
+
+.timeline-tooltip[data-placement="right"]::after {
+    left: calc(-1 * var(--timeline-tooltip-arrow-outside));
+    top: 50%;
+    transform: translateY(-50%) rotate(45deg);
+    border-right: none;
+    border-top: none;
+}
+
+/* Hide native scrollbar of the track */
+.timeline-track::-webkit-scrollbar { width: 0; height: 0; }
+.timeline-track { 
+    scrollbar-width: none; 
+    -ms-overflow-style: none;
+}
+
+/* Left-side slider to control timeline scroll (visual, low-key) */
+.timeline-slider {
+    position: absolute;
+    left: 2px;
+    top: var(--timeline-track-padding);
+    bottom: var(--timeline-track-padding);
+    width: 6px;
+    pointer-events: auto; /* allow handle to capture */
+    opacity: 0;
+    transition: opacity 180ms ease;
+    z-index: 10;
+}
+.timeline-slider.visible { opacity: 1; }
+.timeline-slider::before {
+    content: '';
+    position: absolute;
+    left: 2px;
+    top: 0; bottom: 0;
+    width: 2px;
+    background: rgba(0,0,0,0.08);
+    border-radius: 9999px;
+}
+html.dark .timeline-slider::before { background: rgba(255,255,255,0.10); }
+
+.timeline-slider .timeline-handle {
+    position: absolute;
+    left: 0;
+    width: 6px;
+    height: 24px; /* updated by JS */
+    background: rgba(16,163,127,0.28); /* ChatGPT green with low opacity */
+    border-radius: 9999px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.15);
+    pointer-events: auto;
+    cursor: grab;
+    transition: background-color 120ms ease, opacity 120ms ease;
+}
+.timeline-slider .timeline-handle:hover { background: rgba(16,163,127,0.45); }
+.timeline-slider .timeline-handle:active { cursor: grabbing; }
+/* External left-side slider (outside the timeline bar) */
+.timeline-left-slider {
+    position: fixed;
+    /* left set by JS using bar's rect (to the left of the bar) */
+    top: 0; /* updated by JS */
+    width: 12px; /* hit area; visual line narrower */
+    height: 160px; /* updated by JS */
+    opacity: 0;
+    transition: opacity 180ms ease;
+    z-index: 2147483646; /* align with bar */
+    pointer-events: none;
+}
+.timeline-left-slider.visible { opacity: 1;  pointer-events: auto; }
+.timeline-left-slider::before {
+    content: '';
+    position: absolute;
+    left: 5px; /* center thin track inside 12px hit area */
+    top: 0; bottom: 0;
+    width: 2px;
+    background: rgba(0,0,0,0.08);
+    border-radius: 9999px;
+}
+html.dark .timeline-left-slider::before { background: rgba(255,255,255,0.10); }
+.timeline-left-slider .timeline-left-handle {
+    position: absolute;
+    left: 2px; /* centered for 8px width inside 12px hit area */
+    width: 8px;
+    height: 22px; /* fixed, concise */
+    background: rgba(16,163,127,0.28);
+    border-radius: 9999px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.15);
+    pointer-events: auto;
+    cursor: grab;
+    transition: background-color 120ms ease;
+}
+.timeline-left-slider .timeline-left-handle:hover { background: rgba(16,163,127,0.45); }
+.timeline-left-slider .timeline-left-handle:active { cursor: grabbing; }
