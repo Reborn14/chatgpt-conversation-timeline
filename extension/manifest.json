@@ -22,7 +22,7 @@
         "https://chatgpt.com/*",
         "https://chat.openai.com/*"
       ],
-      "js": ["content-chatgpt.js"],
+      "js": ["chatgpt-initial-jump-utils.js", "content-chatgpt.js"],
       "css": ["styles-chatgpt.css"]
     },
     {
