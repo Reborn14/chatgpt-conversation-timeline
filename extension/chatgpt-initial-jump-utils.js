@@ -106,6 +106,22 @@
     return scrollTop + focusOffset + epsilon;
   }
 
+  function normalizeMarkerPositions(input = {}) {
+    const positions = Array.isArray(input.positions) ? input.positions : [];
+    const previous = Array.isArray(input.previous) ? input.previous : [];
+    if (!positions.length) return [];
+    if (positions.some(position => !Number.isFinite(Number(position)))) {
+      return previous.length === positions.length ? previous.slice() : positions.map(() => 0);
+    }
+    const first = Number(positions[0]);
+    const last = Number(positions[positions.length - 1]);
+    const span = Math.max(1, last - first);
+    return positions.map(position => {
+      const normalized = (Number(position) - first) / span;
+      return Math.max(0, Math.min(1, normalized));
+    });
+  }
+
   function selectActiveIndex(input = {}) {
     const positions = Array.isArray(input.positions) ? input.positions : [];
     const referenceY = Number(input.referenceY);
@@ -123,6 +139,7 @@
   return {
     evaluateInitialJumpReadiness,
     evaluateScrollCorrection,
+    normalizeMarkerPositions,
     pickBestScrollableCandidate,
     resolveActiveReferenceY,
     resolveScrollAnchoring,
