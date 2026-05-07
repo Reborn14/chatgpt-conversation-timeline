@@ -875,26 +875,11 @@ class TimelineManager {
             return this.markerScrollPositions;
         }
         const positions = this.markers.map(marker => this.getElementScrollAnchorTop(marker.element));
-        const previousNormalized = this.markers.map(marker => Number.isFinite(Number(marker.baseN)) ? Number(marker.baseN) : 0);
-        const normalized = InitialJumpUtils.normalizeMarkerPositions({
-            positions,
-            previous: previousNormalized
-        });
-        let visualPositionsChanged = false;
-        for (let i = 0; i < this.markers.length; i++) {
-            const nextN = Number(normalized[i]);
-            if (!Number.isFinite(nextN)) continue;
-            if (Math.abs(nextN - previousNormalized[i]) > 0.001) {
-                this.markers[i].baseN = nextN;
-                visualPositionsChanged = true;
-            }
-        }
         this.markerScrollPositions = positions;
         const first = positions[0] || 0;
         const last = positions[positions.length - 1] || first;
         this.firstUserTurnOffset = first;
         this.contentSpanPx = Math.max(1, last - first);
-        if (visualPositionsChanged) this.updateTimelineGeometry();
         return positions;
     }
 

@@ -3,7 +3,6 @@ const assert = require('node:assert/strict');
 const {
   evaluateInitialJumpReadiness,
   evaluateScrollCorrection,
-  normalizeMarkerPositions,
   pickBestScrollableCandidate,
   resolveActiveReferenceY,
   resolveScrollAnchoring,
@@ -130,19 +129,6 @@ run('evaluateScrollCorrection keeps correcting until the target is stable', () =
     needsWrite: false,
     shouldContinue: false
   });
-});
-
-run('normalizeMarkerPositions remaps visual spacing from live measured positions', () => {
-  assert.deepEqual(normalizeMarkerPositions({
-    positions: [100, 250, 700]
-  }), [0, 0.25, 1]);
-});
-
-run('normalizeMarkerPositions preserves previous values when live positions are invalid', () => {
-  assert.deepEqual(normalizeMarkerPositions({
-    positions: [100, NaN, 700],
-    previous: [0, 0.5, 1]
-  }), [0, 0.5, 1]);
 });
 
 run('pickBestScrollableCandidate prefers the nearest real non-document scroll root', () => {
