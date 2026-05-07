@@ -3,11 +3,15 @@ const assert = require('node:assert/strict');
 const {
   evaluateInitialJumpReadiness,
   evaluateScrollCorrection,
+  calculateTimelineContentHeight,
+  mapLiveReferenceToVisualRatio,
+  normalizeMarkerRatios,
   pickBestScrollableCandidate,
   resolveActiveReferenceY,
   resolveScrollAnchoring,
   resolveScrollFocusOffset,
   resolveScrollTarget,
+  shouldRunTimelineJump,
   selectActiveIndex
 } = require('../extension/chatgpt-initial-jump-utils.js');
 
@@ -102,6 +106,30 @@ run('resolveActiveReferenceY uses the same focus line as controlled jumps', () =
   }), 1002);
 });
 
+run('shouldRunTimelineJump ignores first-load clicks on the already active marker', () => {
+  assert.equal(shouldRunTimelineJump({
+    targetId: 'turn-4',
+    activeTurnId: 'turn-4',
+    initialJumpReady: false
+  }), false);
+});
+
+run('shouldRunTimelineJump still allows first-load clicks on a different marker', () => {
+  assert.equal(shouldRunTimelineJump({
+    targetId: 'turn-2',
+    activeTurnId: 'turn-4',
+    initialJumpReady: false
+  }), true);
+});
+
+run('shouldRunTimelineJump ignores clicks on the already active marker after readiness', () => {
+  assert.equal(shouldRunTimelineJump({
+    targetId: 'turn-4',
+    activeTurnId: 'turn-4',
+    initialJumpReady: true
+  }), false);
+});
+
 run('selectActiveIndex uses measured live positions instead of stale visible hints', () => {
   assert.equal(selectActiveIndex({
     positions: [100, 300, 900],
@@ -129,6 +157,89 @@ run('evaluateScrollCorrection keeps correcting until the target is stable', () =
     needsWrite: false,
     shouldContinue: false
   });
+});
+
+run('normalizeMarkerRatios preserves live anchor interval proportions', () => {
+  const ratios = normalizeMarkerRatios({
+    positions: [120, 420, 1620, 2220]
+  });
+  assert.deepEqual(ratios, [0, 1 / 7, 5 / 7, 1]);
+});
+
+run('normalizeMarkerRatios keeps previous stable ratios when live anchors are incomplete', () => {
+  assert.deepEqual(normalizeMarkerRatios({
+    positions: [120, NaN, 2220],
+    previous: [0, 0.4, 1]
+  }), [0, 0.4, 1]);
+});
+
+run('normalizeMarkerRatios keeps previous stable ratios when live anchors are not monotonic', () => {
+  assert.deepEqual(normalizeMarkerRatios({
+    positions: [120, 620, 590, 2220],
+    previous: [0, 0.24, 0.48, 1]
+  }), [0, 0.24, 0.48, 1]);
+});
+
+run('normalizeMarkerRatios falls back to zeros when bad anchors have no stable previous ratios', () => {
+  assert.deepEqual(normalizeMarkerRatios({
+    positions: [120, 620, 590, 2220],
+    previous: [undefined, undefined, undefined, undefined]
+  }), [0, 0, 0, 0]);
+});
+
+run('normalizeMarkerRatios keeps previous stable ratios when a delayed rebuild is severely skewed', () => {
+  assert.deepEqual(normalizeMarkerRatios({
+    positions: [100, 200, 300, 1300],
+    previous: [0, 1 / 3, 2 / 3, 1],
+    preservePreviousOnSkew: true
+  }), [0, 1 / 3, 2 / 3, 1]);
+});
+
+run('normalizeMarkerRatios accepts skewed ratios when there is no previous stable shape', () => {
+  assert.deepEqual(normalizeMarkerRatios({
+    positions: [100, 200, 300, 1300],
+    preservePreviousOnSkew: true
+  }), [0, 1 / 12, 1 / 6, 1]);
+});
+
+run('mapLiveReferenceToVisualRatio maps live scroll references onto stable visual spacing', () => {
+  const ratio = mapLiveReferenceToVisualRatio({
+    livePositions: [100, 300, 900],
+    visualRatios: [0, 0.2, 1],
+    referenceY: 600
+  });
+  assert.ok(Math.abs(ratio - 0.6) < 0.0001);
+});
+
+run('mapLiveReferenceToVisualRatio clamps outside the measured live range', () => {
+  assert.equal(mapLiveReferenceToVisualRatio({
+    livePositions: [100, 300, 900],
+    visualRatios: [0, 0.2, 1],
+    referenceY: 50
+  }), 0);
+  assert.equal(mapLiveReferenceToVisualRatio({
+    livePositions: [100, 300, 900],
+    visualRatios: [0, 0.2, 1],
+    referenceY: 1200
+  }), 1);
+});
+
+run('calculateTimelineContentHeight expands dense proportional spacing before min-gap adjustment', () => {
+  assert.equal(calculateTimelineContentHeight({
+    viewportHeight: 651,
+    padding: 16,
+    minGap: 24,
+    markerRatios: [0, 0.032, 0.21, 0.3, 1]
+  }), 782);
+});
+
+run('calculateTimelineContentHeight keeps the viewport height when proportional spacing already fits', () => {
+  assert.equal(calculateTimelineContentHeight({
+    viewportHeight: 651,
+    padding: 16,
+    minGap: 24,
+    markerRatios: [0, 0.25, 0.5, 0.75, 1]
+  }), 651);
 });
 
 run('pickBestScrollableCandidate prefers the nearest real non-document scroll root', () => {

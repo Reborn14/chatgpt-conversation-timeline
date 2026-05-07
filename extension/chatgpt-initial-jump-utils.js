@@ -106,6 +106,127 @@
     return scrollTop + focusOffset + epsilon;
   }
 
+  function shouldRunTimelineJump(input = {}) {
+    const targetId = String(input.targetId || '').trim();
+    const activeTurnId = String(input.activeTurnId || '').trim();
+    if (!targetId) return false;
+    if (activeTurnId && targetId === activeTurnId) return false;
+    return true;
+  }
+
+  function normalizeMarkerRatios(input = {}) {
+    const positions = Array.isArray(input.positions) ? input.positions : [];
+    const previous = Array.isArray(input.previous) ? input.previous : [];
+    if (!positions.length) return [];
+    const numericPositions = positions.map(position => Number(position));
+    const previousRatios = previous.map(ratio => Number(ratio));
+    const hasPrevious = previousRatios.length === positions.length && previousRatios.every(ratio => Number.isFinite(ratio));
+    const fallback = () => hasPrevious ? previous.slice() : positions.map(() => 0);
+    if (numericPositions.some(position => !Number.isFinite(position))) {
+      return fallback();
+    }
+    for (let i = 1; i < numericPositions.length; i++) {
+      if (numericPositions[i] <= numericPositions[i - 1]) {
+        return fallback();
+      }
+    }
+    if (numericPositions.length > 1 && (numericPositions[numericPositions.length - 1] - numericPositions[0]) < 1) {
+      return fallback();
+    }
+    if (numericPositions.length === 1) {
+      return previous.length === positions.length ? previous.slice() : positions.map(() => 0);
+    }
+    const first = numericPositions[0];
+    const last = numericPositions[numericPositions.length - 1];
+    const span = Math.max(1, last - first);
+    const normalized = numericPositions.map(position => {
+      const normalized = (position - first) / span;
+      return Math.max(0, Math.min(1, normalized));
+    });
+    if (input.preservePreviousOnSkew && hasPrevious && normalized.length >= 4) {
+      const gaps = ratios => {
+        const out = [];
+        for (let i = 1; i < ratios.length; i++) out.push(Math.max(0, Number(ratios[i]) - Number(ratios[i - 1])));
+        return out;
+      };
+      const candidateGaps = gaps(normalized);
+      const previousGaps = gaps(previousRatios);
+      const candidateMax = Math.max(...candidateGaps);
+      const candidateMin = Math.min(...candidateGaps.filter(gap => gap > 0));
+      const previousMax = Math.max(...previousGaps);
+      const previousMin = Math.min(...previousGaps.filter(gap => gap > 0));
+      const candidateSpread = candidateMin > 0 ? candidateMax / candidateMin : Infinity;
+      const previousSpread = previousMin > 0 ? previousMax / previousMin : Infinity;
+      if (Number.isFinite(previousSpread) && candidateSpread > Math.max(6, previousSpread * 4)) {
+        return previous.slice();
+      }
+    }
+    return normalized;
+  }
+
+  function mapLiveReferenceToVisualRatio(input = {}) {
+    const livePositions = Array.isArray(input.livePositions) ? input.livePositions : [];
+    const visualRatios = Array.isArray(input.visualRatios) ? input.visualRatios : [];
+    const referenceY = Number(input.referenceY);
+    if (!livePositions.length || livePositions.length !== visualRatios.length || !Number.isFinite(referenceY)) return 0;
+    const firstLive = Number(livePositions[0]);
+    const firstRatio = Number(visualRatios[0]);
+    if (!Number.isFinite(firstLive) || !Number.isFinite(firstRatio)) return 0;
+    if (referenceY <= firstLive) return Math.max(0, Math.min(1, firstRatio));
+
+    for (let i = 1; i < livePositions.length; i++) {
+      const prevLive = Number(livePositions[i - 1]);
+      const nextLive = Number(livePositions[i]);
+      const prevRatio = Number(visualRatios[i - 1]);
+      const nextRatio = Number(visualRatios[i]);
+      if (
+        !Number.isFinite(prevLive) ||
+        !Number.isFinite(nextLive) ||
+        !Number.isFinite(prevRatio) ||
+        !Number.isFinite(nextRatio)
+      ) {
+        continue;
+      }
+      if (referenceY <= nextLive) {
+        const span = Math.max(1, nextLive - prevLive);
+        const progress = Math.max(0, Math.min(1, (referenceY - prevLive) / span));
+        return Math.max(0, Math.min(1, prevRatio + (nextRatio - prevRatio) * progress));
+      }
+    }
+
+    const lastRatio = Number(visualRatios[visualRatios.length - 1]);
+    return Math.max(0, Math.min(1, Number.isFinite(lastRatio) ? lastRatio : 1));
+  }
+
+  function calculateTimelineContentHeight(input = {}) {
+    const viewportHeight = Math.max(0, Number(input.viewportHeight) || 0);
+    const padding = Math.max(0, Number(input.padding) || 0);
+    const minGap = Math.max(0, Number(input.minGap) || 0);
+    const markerRatios = Array.isArray(input.markerRatios) ? input.markerRatios : [];
+    const markerCount = markerRatios.length;
+    const countHeight = markerCount > 0 ? (2 * padding + Math.max(0, markerCount - 1) * minGap) : viewportHeight;
+    let desired = Math.max(viewportHeight, countHeight);
+
+    let minRatioGap = Infinity;
+    let previous = null;
+    for (const value of markerRatios) {
+      const ratio = Number(value);
+      if (!Number.isFinite(ratio)) continue;
+      const clamped = Math.max(0, Math.min(1, ratio));
+      if (previous !== null) {
+        const gap = clamped - previous;
+        if (gap > 0) minRatioGap = Math.min(minRatioGap, gap);
+      }
+      previous = clamped;
+    }
+
+    if (Number.isFinite(minRatioGap) && minRatioGap > 0 && minGap > 0) {
+      desired = Math.max(desired, 2 * padding + minGap / minRatioGap);
+    }
+
+    return Math.ceil(desired);
+  }
+
   function selectActiveIndex(input = {}) {
     const positions = Array.isArray(input.positions) ? input.positions : [];
     const referenceY = Number(input.referenceY);
@@ -123,6 +244,10 @@
   return {
     evaluateInitialJumpReadiness,
     evaluateScrollCorrection,
+    calculateTimelineContentHeight,
+    mapLiveReferenceToVisualRatio,
+    normalizeMarkerRatios,
+    shouldRunTimelineJump,
     pickBestScrollableCandidate,
     resolveActiveReferenceY,
     resolveScrollAnchoring,

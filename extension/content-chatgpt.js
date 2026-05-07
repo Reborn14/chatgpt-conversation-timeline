@@ -271,10 +271,18 @@ class TimelineManager {
         // Clear old dots from track/content (now that we know content exists)
         (this.ui.trackContent || this.ui.timelineBar).querySelectorAll('.timeline-dot').forEach(n => n.remove());
 
-        const measuredPositions = Array.from(userTurnElements).map(el => this.getElementScrollAnchorTop(el));
+        const turnElements = Array.from(userTurnElements);
+        const measuredPositions = turnElements.map(el => this.getElementScrollAnchorTop(el));
         const firstTurnOffset = measuredPositions[0] || 0;
         const lastTurnOffset = measuredPositions[measuredPositions.length - 1] || firstTurnOffset;
         const contentSpan = Math.max(1, lastTurnOffset - firstTurnOffset);
+        const previousRatiosById = new Map(this.markers.map(marker => [marker.id, marker.baseN ?? marker.n ?? 0]));
+        const previousRatios = turnElements.map(el => previousRatiosById.get(el.dataset.turnId));
+        const markerRatios = InitialJumpUtils.normalizeMarkerRatios({
+            positions: measuredPositions,
+            previous: previousRatios,
+            preservePreviousOnSkew: previousRatiosById.size > 0
+        });
 
         // Cache for scroll mapping
         this.firstUserTurnOffset = firstTurnOffset;
@@ -283,9 +291,8 @@ class TimelineManager {
 
         // Build markers with normalized position along conversation
         this.markerMap.clear();
-        this.markers = Array.from(userTurnElements).map((el, index) => {
-            const offsetFromStart = measuredPositions[index] - firstTurnOffset;
-            let n = offsetFromStart / contentSpan;
+        this.markers = turnElements.map((el, index) => {
+            let n = markerRatios[index];
             n = Math.max(0, Math.min(1, n));
             const m = {
                 id: el.dataset.turnId,
@@ -401,7 +408,9 @@ class TimelineManager {
 
         this.scrollContainer = this.getScrollableAncestor(newConv);
         // Reattach scroll listener
-        this.onScroll = () => this.scheduleScrollSync();
+        this.onScroll = () => {
+            this.scheduleScrollSync();
+        };
         this.scrollContainer.addEventListener('scroll', this.onScroll, { passive: true });
 
         // Recreate IntersectionObserver with new root
@@ -492,7 +501,9 @@ class TimelineManager {
             this.ui.timelineBar.addEventListener('pointerleave', this.onPointerLeave);
         } catch {}
         // Listen to container scroll to keep marker active state in sync
-        this.onScroll = () => this.scheduleScrollSync();
+        this.onScroll = () => {
+            this.scheduleScrollSync();
+        };
         this.scrollContainer.addEventListener('scroll', this.onScroll, { passive: true });
 
         // Tooltip interactions (delegated)
@@ -700,7 +711,8 @@ class TimelineManager {
             const style = window.getComputedStyle(el);
             const overflowY = String(style.overflowY || '').toLowerCase();
             const allowed = overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay';
-            if (!allowed && el !== document.scrollingElement && el !== document.documentElement && el !== document.body) return false;
+            const isDocument = el === document.scrollingElement || el === document.documentElement || el === document.body;
+            if (!allowed && !isDocument) return false;
             if ((el.scrollHeight - el.clientHeight) > 4) return true;
             const previous = el.scrollTop;
             el.scrollTop = previous + 1;
@@ -962,6 +974,14 @@ class TimelineManager {
     queueOrRunTimelineJump(targetId) {
         const resolved = this.resolvePendingJumpTarget({ targetId });
         if (!resolved?.targetElement) return;
+        if (!InitialJumpUtils.shouldRunTimelineJump({
+            targetId: resolved.targetId,
+            activeTurnId: this.activeTurnId,
+            initialJumpReady: this.initialJumpReady
+        })) {
+            this.pendingInitialJump = null;
+            return;
+        }
         this.activeTurnId = resolved.targetId;
         this.pendingActiveId = null;
         this.updateActiveDotUI();
@@ -980,16 +1000,19 @@ class TimelineManager {
         this.lockScrollAnchoring();
         const session = this.smoothScrollSession;
         const container = this.scrollContainer;
-        const targetPosition = this.getTargetScrollTop(targetElement);
-        if (!Number.isFinite(targetPosition)) {
-            this.unlockScrollAnchoring();
-            return;
-        }
-        const startPosition = this.scrollContainer.scrollTop;
         const nowBase = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
         this.suppressActiveUntil = nowBase + duration + 1800;
+        const startPosition = this.scrollContainer.scrollTop;
+        const targetPosition = this.getTargetScrollTop(targetElement);
+        if (!Number.isFinite(targetPosition) || Math.abs(targetPosition - startPosition) <= 1) {
+            this.isScrolling = false;
+            this.smoothScrollRafId = null;
+            this.suppressActiveUntil = 0;
+            this.unlockScrollAnchoring();
+            this.scheduleScrollSync();
+            return;
+        }
         let startTime = null;
-
         const animation = (currentTime) => {
             if (session !== this.smoothScrollSession || !this.scrollContainer || this.scrollContainer !== container) return;
             this.isScrolling = true;
@@ -1337,8 +1360,13 @@ class TimelineManager {
         const pad = this.getTrackPadding();
         const minGap = this.getMinGap();
         const N = this.markers.length;
-        // Content height ensures minGap between consecutive dots
-        const desired = Math.max(H, (N > 0 ? (2 * pad + Math.max(0, N - 1) * minGap) : H));
+        const markerRatios = this.markers.map(marker => marker.baseN ?? marker.n ?? 0);
+        const desired = InitialJumpUtils.calculateTimelineContentHeight({
+            viewportHeight: H,
+            padding: pad,
+            minGap,
+            markerRatios
+        });
         this.contentHeight = Math.ceil(desired);
         this.scale = (H > 0) ? (this.contentHeight / H) : 1;
         try { this.ui.trackContent.style.height = `${this.contentHeight}px`; } catch {}
@@ -1399,9 +1427,13 @@ class TimelineManager {
         if (!this.ui.track || !this.scrollContainer || !this.contentHeight) return;
         const scrollTop = this.scrollContainer.scrollTop;
         const ref = this.getActiveReferenceY(scrollTop);
-        this.refreshMarkerScrollPositions();
-        const span = Math.max(1, this.contentSpanPx || 1);
-        const r = Math.max(0, Math.min(1, (ref - (this.firstUserTurnOffset || 0)) / span));
+        const livePositions = this.refreshMarkerScrollPositions();
+        const visualRatios = this.markers.map(marker => marker.baseN ?? marker.n ?? 0);
+        const r = InitialJumpUtils.mapLiveReferenceToVisualRatio({
+            livePositions,
+            visualRatios,
+            referenceY: ref
+        });
         const maxScroll = Math.max(0, this.contentHeight - (this.ui.track.clientHeight || 0));
         const target = Math.round(r * maxScroll);
         if (Math.abs((this.ui.track.scrollTop || 0) - target) > 1) {
@@ -1452,6 +1484,7 @@ class TimelineManager {
                 dot.dataset.targetTurnId = marker.id;
                 dot.setAttribute('aria-label', marker.summary);
                 dot.setAttribute('tabindex', '0');
+                dot.setAttribute('type', 'button');
                 try { dot.setAttribute('aria-describedby', 'chatgpt-timeline-tooltip'); } catch {}
                 try { dot.style.setProperty('--n', String(marker.n || 0)); } catch {}
                 if (this.usePixelTop) {
