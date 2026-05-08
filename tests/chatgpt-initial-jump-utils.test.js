@@ -202,6 +202,13 @@ run('normalizeMarkerRatios accepts skewed ratios when there is no previous stabl
   }), [0, 1 / 12, 1 / 6, 1]);
 });
 
+run('normalizeMarkerRatios keeps a single marker renderable without a previous ratio', () => {
+  assert.deepEqual(normalizeMarkerRatios({
+    positions: [120],
+    previous: [undefined]
+  }), [0]);
+});
+
 run('mapLiveReferenceToVisualRatio maps live scroll references onto stable visual spacing', () => {
   const ratio = mapLiveReferenceToVisualRatio({
     livePositions: [100, 300, 900],

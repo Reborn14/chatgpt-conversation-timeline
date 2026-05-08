@@ -134,7 +134,7 @@
       return fallback();
     }
     if (numericPositions.length === 1) {
-      return previous.length === positions.length ? previous.slice() : positions.map(() => 0);
+      return hasPrevious ? previousRatios.map(ratio => Math.max(0, Math.min(1, ratio))) : [0];
     }
     const first = numericPositions[0];
     const last = numericPositions[numericPositions.length - 1];
