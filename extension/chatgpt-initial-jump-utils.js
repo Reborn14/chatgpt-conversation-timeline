@@ -121,7 +121,15 @@
     const numericPositions = positions.map(position => Number(position));
     const previousRatios = previous.map(ratio => Number(ratio));
     const hasPrevious = previousRatios.length === positions.length && previousRatios.every(ratio => Number.isFinite(ratio));
-    const fallback = () => hasPrevious ? previous.slice() : positions.map(() => 0);
+    const readableFallback = () => {
+      if (positions.length <= 1) return positions.map(() => 0);
+      return positions.map((_, index) => index / Math.max(1, positions.length - 1));
+    };
+    const hasUsablePrevious = hasPrevious && (
+      positions.length <= 1 ||
+      previousRatios[previousRatios.length - 1] > previousRatios[0]
+    );
+    const fallback = () => hasUsablePrevious ? previousRatios.slice() : readableFallback();
     if (numericPositions.some(position => !Number.isFinite(position))) {
       return fallback();
     }

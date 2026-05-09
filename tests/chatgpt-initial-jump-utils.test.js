@@ -180,11 +180,18 @@ run('normalizeMarkerRatios keeps previous stable ratios when live anchors are no
   }), [0, 0.24, 0.48, 1]);
 });
 
-run('normalizeMarkerRatios falls back to zeros when bad anchors have no stable previous ratios', () => {
+run('normalizeMarkerRatios falls back to readable spacing when bad anchors have no stable previous ratios', () => {
   assert.deepEqual(normalizeMarkerRatios({
     positions: [120, 620, 590, 2220],
     previous: [undefined, undefined, undefined, undefined]
-  }), [0, 0, 0, 0]);
+  }), [0, 1 / 3, 2 / 3, 1]);
+});
+
+run('normalizeMarkerRatios does not preserve a collapsed previous shape', () => {
+  assert.deepEqual(normalizeMarkerRatios({
+    positions: [120, 620, 590],
+    previous: [0, 0, 0]
+  }), [0, 0.5, 1]);
 });
 
 run('normalizeMarkerRatios keeps previous stable ratios when a delayed rebuild is severely skewed', () => {
