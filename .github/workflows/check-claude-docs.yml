@@ -1,0 +1,56 @@
+name: Check CLAUDE.md Sync
+
+on:
+  pull_request:
+    paths:
+      - 'CLAUDE.md'
+      - 'CLAUDE.zh-CN.md'
+  push:
+    paths:
+      - 'CLAUDE.md'
+      - 'CLAUDE.zh-CN.md'
+    branches:
+      - main
+      - master
+
+jobs:
+  check-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 2  # Fetch last 2 commits to compare
+
+      - name: Check if CLAUDE.md changed without CLAUDE.zh-CN.md
+        run: |
+          # Get list of changed files in this push/PR
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            CHANGED_FILES=$(git diff --name-only ${{ github.event.pull_request.base.sha }} ${{ github.event.pull_request.head.sha }})
+          else
+            CHANGED_FILES=$(git diff --name-only HEAD^ HEAD)
+          fi
+
+          echo "Changed files:"
+          echo "$CHANGED_FILES"
+
+          # Check if CLAUDE.md was modified
+          if echo "$CHANGED_FILES" | grep -q "^CLAUDE\.md$"; then
+            echo "✓ CLAUDE.md was modified"
+
+            # Check if CLAUDE.zh-CN.md was also modified
+            if echo "$CHANGED_FILES" | grep -q "^CLAUDE\.zh-CN\.md$"; then
+              echo "✓ CLAUDE.zh-CN.md was also modified - OK!"
+              exit 0
+            else
+              echo "⚠️  WARNING: CLAUDE.md was modified but CLAUDE.zh-CN.md was not updated"
+              echo "Please consider updating the Chinese version to keep documentation in sync."
+              echo ""
+              echo "警告：CLAUDE.md 已修改，但 CLAUDE.zh-CN.md 未更新"
+              echo "请考虑更新中文版本以保持文档同步。"
+              exit 1
+            fi
+          else
+            echo "✓ CLAUDE.md was not modified - skipping check"
+            exit 0
+          fi

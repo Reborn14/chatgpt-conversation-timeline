@@ -1,0 +1,30 @@
+{
+  "manifest_version": 2,
+  "name": "ChatGPT Conversation Timeline",
+  "version": "1.0.0",
+  "description": "Adds a navigation timeline to ChatGPT conversations for easy navigation.",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*"
+      ],
+      "js": ["content.js"],
+      "css": ["styles.css"],
+      "run_at": "document_end"
+    }
+  ],
+  "permissions": [
+    "activeTab"
+  ],
+  "applications": {
+    "gecko": {
+      "id": "chatgpt-timeline@example.com",
+      "strict_min_version": "91.0"
+    }
+  },
+  "icons": {
+    "48": "icon.svg",
+    "96": "icon.svg"
+  }
+}
