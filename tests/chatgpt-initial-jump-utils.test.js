@@ -251,6 +251,12 @@ run('normalizeMarkerRatios uses uniform directory spacing for low-confidence vir
   }), [0, 1 / 6, 2 / 6, 3 / 6, 4 / 6, 5 / 6, 1]);
 });
 
+run('normalizeMarkerRatios uses uniform directory spacing for five-marker virtual samples', () => {
+  assert.deepEqual(normalizeMarkerRatios({
+    positions: [0, 707, 1427, 13005, 16272]
+  }), [0, 0.25, 0.5, 0.75, 1]);
+});
+
 run('normalizeMarkerRatios does not preserve a sparse skewed previous virtual shape', () => {
   assert.deepEqual(normalizeMarkerRatios({
     positions: [110, 210, 310, 1310],
@@ -259,11 +265,12 @@ run('normalizeMarkerRatios does not preserve a sparse skewed previous virtual sh
   }), [0, 1 / 3, 2 / 3, 1]);
 });
 
-run('normalizeMarkerRatios accepts skewed ratios once the sample is dense enough', () => {
+run('normalizeMarkerRatios accepts skewed ratios once the sample is large enough', () => {
+  const positions = [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100, 1300, 1600];
   assert.deepEqual(normalizeMarkerRatios({
-    positions: [100, 200, 300, 1300, 1600],
+    positions,
     preservePreviousOnSkew: true
-  }), [0, 1 / 15, 2 / 15, 12 / 15, 1]);
+  }), positions.map(position => (position - 100) / 1500));
 });
 
 run('normalizeMarkerRatios keeps a single marker renderable without a previous ratio', () => {
