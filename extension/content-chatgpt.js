@@ -73,6 +73,9 @@ class TimelineManager {
         // Debug perf
         this.debugPerf = false;
         try { this.debugPerf = (localStorage.getItem('chatgptTimelineDebugPerf') === '1'); } catch {}
+        this.debugLayout = false;
+        try { this.debugLayout = (localStorage.getItem('chatgptTimelineDebugLayout') === '1'); } catch {}
+        this.lastLayoutDebugKey = '';
         this.onVisualViewportResize = null;
         
         this.debouncedRecalculateAndRender = this.debounce(this.recalculateAndRenderMarkers, 350);
@@ -834,8 +837,14 @@ class TimelineManager {
         const rawTop = targetRect.top - containerRect.top + this.scrollContainer.scrollTop;
         return InitialJumpUtils.resolveScrollTarget({
             rawTop,
-            focusOffset: this.getScrollFocusOffset()
+            focusOffset: this.getScrollFocusOffset(),
+            maxScrollTop: this.getMaxScrollTop()
         });
+    }
+
+    getMaxScrollTop() {
+        if (!this.scrollContainer) return 0;
+        return Math.max(0, (Number(this.scrollContainer.scrollHeight) || 0) - (Number(this.scrollContainer.clientHeight) || 0));
     }
 
     readComputedPixelValue(...values) {
@@ -1150,10 +1159,14 @@ class TimelineManager {
     // Normalize whitespace and trim; remove leading SR-only prefixes like "You said:" / "你说："; no manual ellipsis
     normalizeText(text) {
         try {
+            if (InitialJumpUtils?.normalizeChatGPTTurnText) {
+                return InitialJumpUtils.normalizeChatGPTTurnText(text);
+            }
             let s = String(text || '').replace(/\s+/g, ' ').trim();
             // Strip only if it appears at the very start
             s = s.replace(/^\s*(you\s*said\s*[:：]?\s*)/i, '');
             s = s.replace(/^\s*((你说|您说|你說|您說)\s*[:：]?\s*)/, '');
+            s = s.replace(/(?:\s*(?:show\s+more|show\s+less|显示更多|顯示更多|显示较少|顯示較少|收起))+$/i, '').trim();
             return s;
         } catch {
             return '';
@@ -1398,6 +1411,84 @@ class TimelineManager {
         } else {
             this.sliderAlwaysVisible = false;
         }
+        this.maybeLogLayoutDebug('geometry');
+    }
+
+    getRatioSpread(ratios) {
+        try {
+            const gaps = [];
+            for (let i = 1; i < ratios.length; i++) {
+                const gap = Number(ratios[i]) - Number(ratios[i - 1]);
+                if (Number.isFinite(gap) && gap > 0) gaps.push(gap);
+            }
+            if (!gaps.length) return { minGapRatio: null, maxGapRatio: null, spread: null };
+            const minGapRatio = Math.min(...gaps);
+            const maxGapRatio = Math.max(...gaps);
+            return {
+                minGapRatio,
+                maxGapRatio,
+                spread: minGapRatio > 0 ? maxGapRatio / minGapRatio : null
+            };
+        } catch {
+            return { minGapRatio: null, maxGapRatio: null, spread: null };
+        }
+    }
+
+    buildLayoutDebugSnapshot(stage) {
+        const barRect = this.ui.timelineBar?.getBoundingClientRect?.();
+        const trackRect = this.ui.track?.getBoundingClientRect?.();
+        const baseRatios = this.markers.map(marker => marker.baseN ?? marker.n ?? 0);
+        const renderedDots = Array.from(this.ui.trackContent?.querySelectorAll?.('.timeline-dot') || []).slice(0, 12).map(dot => {
+            const rect = dot.getBoundingClientRect();
+            return {
+                id: dot.dataset.targetTurnId || '',
+                cssN: dot.style.getPropertyValue('--n') || '',
+                topViewport: Math.round(rect.top * 10) / 10,
+                topInBar: barRect ? Math.round((rect.top - barRect.top + rect.height / 2) * 10) / 10 : null
+            };
+        });
+        return {
+            stage,
+            href: location.href,
+            markerCount: this.markers.length,
+            activeTurnId: this.activeTurnId,
+            scrollTop: Math.round(Number(this.scrollContainer?.scrollTop) || 0),
+            scrollHeight: Math.round(Number(this.scrollContainer?.scrollHeight) || 0),
+            barHeight: Math.round(barRect?.height || 0),
+            trackHeight: Math.round(trackRect?.height || 0),
+            trackScrollTop: Math.round(Number(this.ui.track?.scrollTop) || 0),
+            contentHeight: Math.round(this.contentHeight || 0),
+            scale: Math.round((this.scale || 0) * 1000) / 1000,
+            usePixelTop: !!this.usePixelTop,
+            cssVarTopSupported: this._cssVarTopSupported,
+            minGap: this.getMinGap(),
+            padding: this.getTrackPadding(),
+            ratioSpread: this.getRatioSpread(baseRatios),
+            positions: this.markerScrollPositions.map(value => Math.round(Number(value) || 0)),
+            baseRatios: baseRatios.map(value => Math.round((Number(value) || 0) * 10000) / 10000),
+            visualRatios: this.markers.map(marker => Math.round((Number(marker.n) || 0) * 10000) / 10000),
+            yPositions: this.yPositions.map(value => Math.round((Number(value) || 0) * 10) / 10),
+            visibleRange: { ...this.visibleRange },
+            renderedDots
+        };
+    }
+
+    maybeLogLayoutDebug(stage) {
+        try {
+            if (!this.markers.length) return;
+            if (!this.debugLayout) return;
+            const key = [
+                stage,
+                this.markers.length,
+                Math.round(this.contentHeight || 0),
+                this.yPositions.slice(0, 4).map(value => Math.round((Number(value) || 0) * 10) / 10).join(',')
+            ].join('|');
+            if (key === this.lastLayoutDebugKey) return;
+            this.lastLayoutDebugKey = key;
+            console.warn('[ChatGPT Timeline Layout Debug]', this.buildLayoutDebugSnapshot(stage));
+        } catch (error) {
+            console.warn('[ChatGPT Timeline Layout Debug failed]', error);
+        }
     }
 
     detectCssVarTopSupport(pad, usableC) {
@@ -1515,6 +1606,7 @@ class TimelineManager {
         this.visibleRange = { start, end };
         // keep slider in sync with timeline scroll
         this.updateSlider();
+        this.maybeLogLayoutDebug('render');
     }
 
     lowerBound(arr, x) {
@@ -1710,7 +1802,10 @@ class TimelineManager {
         const positions = this.refreshMarkerScrollPositions();
         const activeIndex = InitialJumpUtils.selectActiveIndex({
             positions,
-            referenceY: ref
+            referenceY: ref,
+            scrollTop,
+            clientHeight: this.scrollContainer.clientHeight,
+            scrollHeight: this.scrollContainer.scrollHeight
         });
         const activeId = this.markers[activeIndex]?.id || this.markers[0].id;
         if (this.activeTurnId !== activeId) {

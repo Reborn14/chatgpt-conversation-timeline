@@ -96,7 +96,12 @@
     const rawTop = Number(input.rawTop);
     const focusOffset = Math.max(0, Number(input.focusOffset) || 0);
     if (!Number.isFinite(rawTop)) return NaN;
-    return rawTop - focusOffset;
+    const target = rawTop - focusOffset;
+    const maxScrollTop = Number(input.maxScrollTop);
+    if (Number.isFinite(maxScrollTop) && maxScrollTop >= 0) {
+      return Math.max(0, Math.min(target, maxScrollTop));
+    }
+    return target;
   }
 
   function resolveActiveReferenceY(input = {}) {
@@ -112,6 +117,18 @@
     if (!targetId) return false;
     if (activeTurnId && targetId === activeTurnId) return false;
     return true;
+  }
+
+  function normalizeChatGPTTurnText(text) {
+    try {
+      let value = String(text || '').replace(/\s+/g, ' ').trim();
+      value = value.replace(/^\s*(you\s*said\s*[:：]?\s*)/i, '');
+      value = value.replace(/^\s*((你说|您说|你說|您說)\s*[:：]?\s*)/, '');
+      value = value.replace(/(?:\s*(?:show\s+more|show\s+less|显示更多|顯示更多|显示较少|顯示較少|收起))+$/i, '').trim();
+      return value;
+    } catch {
+      return '';
+    }
   }
 
   function normalizeMarkerRatios(input = {}) {
@@ -151,22 +168,32 @@
       const normalized = (position - first) / span;
       return Math.max(0, Math.min(1, normalized));
     });
-    if (input.preservePreviousOnSkew && hasPrevious && normalized.length >= 4) {
+    if (normalized.length >= 4) {
       const gaps = ratios => {
         const out = [];
         for (let i = 1; i < ratios.length; i++) out.push(Math.max(0, Number(ratios[i]) - Number(ratios[i - 1])));
         return out;
       };
       const candidateGaps = gaps(normalized);
-      const previousGaps = gaps(previousRatios);
       const candidateMax = Math.max(...candidateGaps);
       const candidateMin = Math.min(...candidateGaps.filter(gap => gap > 0));
-      const previousMax = Math.max(...previousGaps);
-      const previousMin = Math.min(...previousGaps.filter(gap => gap > 0));
       const candidateSpread = candidateMin > 0 ? candidateMax / candidateMin : Infinity;
-      const previousSpread = previousMin > 0 ? previousMax / previousMin : Infinity;
-      if (Number.isFinite(previousSpread) && candidateSpread > Math.max(6, previousSpread * 4)) {
-        return previous.slice();
+      if (normalized.length <= 4 && candidateSpread > 6) {
+        if (!hasPrevious) return readableFallback();
+        const previousGaps = gaps(previousRatios);
+        const previousMax = Math.max(...previousGaps);
+        const previousMin = Math.min(...previousGaps.filter(gap => gap > 0));
+        const previousSpread = previousMin > 0 ? previousMax / previousMin : Infinity;
+        if (previousSpread > 6) return readableFallback();
+      }
+      if (input.preservePreviousOnSkew && hasPrevious) {
+        const previousGaps = gaps(previousRatios);
+        const previousMax = Math.max(...previousGaps);
+        const previousMin = Math.min(...previousGaps.filter(gap => gap > 0));
+        const previousSpread = previousMin > 0 ? previousMax / previousMin : Infinity;
+        if (Number.isFinite(previousSpread) && candidateSpread > Math.max(6, previousSpread * 4)) {
+          return previous.slice();
+        }
       }
     }
     return normalized;
@@ -228,7 +255,8 @@
       previous = clamped;
     }
 
-    if (Number.isFinite(minRatioGap) && minRatioGap > 0 && minGap > 0) {
+    const sparseVirtualSample = markerCount <= 4;
+    if (!sparseVirtualSample && Number.isFinite(minRatioGap) && minRatioGap > 0 && minGap > 0) {
       desired = Math.max(desired, 2 * padding + minGap / minRatioGap);
     }
 
@@ -239,6 +267,18 @@
     const positions = Array.isArray(input.positions) ? input.positions : [];
     const referenceY = Number(input.referenceY);
     if (!positions.length || !Number.isFinite(referenceY)) return 0;
+    const scrollTop = Number(input.scrollTop);
+    const clientHeight = Number(input.clientHeight);
+    const scrollHeight = Number(input.scrollHeight);
+    const bottomEpsilon = Math.max(0, Number(input.bottomEpsilon) || 4);
+    if (
+      Number.isFinite(scrollTop) &&
+      Number.isFinite(clientHeight) &&
+      Number.isFinite(scrollHeight) &&
+      scrollHeight - (scrollTop + clientHeight) <= bottomEpsilon
+    ) {
+      return positions.length - 1;
+    }
     let active = 0;
     for (let i = 0; i < positions.length; i++) {
       const position = Number(positions[i]);
@@ -261,6 +301,7 @@
     resolveScrollAnchoring,
     resolveScrollFocusOffset,
     resolveScrollTarget,
+    normalizeChatGPTTurnText,
     selectActiveIndex
   };
 });

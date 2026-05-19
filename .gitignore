@@ -1,2 +1,4 @@
 tests/
 .claude/
+extension.crx
+extension.pem
