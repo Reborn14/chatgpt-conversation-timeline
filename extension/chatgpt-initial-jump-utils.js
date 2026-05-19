@@ -178,7 +178,8 @@
       const candidateMax = Math.max(...candidateGaps);
       const candidateMin = Math.min(...candidateGaps.filter(gap => gap > 0));
       const candidateSpread = candidateMin > 0 ? candidateMax / candidateMin : Infinity;
-      if (normalized.length <= 4 && candidateSpread > 6) {
+      const lowConfidenceVirtualCount = normalized.length <= 4 || (normalized.length >= 6 && normalized.length <= 12);
+      if (lowConfidenceVirtualCount && candidateSpread > 6) {
         if (!hasPrevious) return readableFallback();
         const previousGaps = gaps(previousRatios);
         const previousMax = Math.max(...previousGaps);

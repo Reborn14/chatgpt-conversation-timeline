@@ -245,6 +245,12 @@ run('normalizeMarkerRatios falls back for first sparse skewed virtual sample wit
   }), [0, 1 / 3, 2 / 3, 1]);
 });
 
+run('normalizeMarkerRatios uses uniform directory spacing for low-confidence virtual samples', () => {
+  assert.deepEqual(normalizeMarkerRatios({
+    positions: [0, 720, 1440, 2160, 2880, 10000, 18591]
+  }), [0, 1 / 6, 2 / 6, 3 / 6, 4 / 6, 5 / 6, 1]);
+});
+
 run('normalizeMarkerRatios does not preserve a sparse skewed previous virtual shape', () => {
   assert.deepEqual(normalizeMarkerRatios({
     positions: [110, 210, 310, 1310],
