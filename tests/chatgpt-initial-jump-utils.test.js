@@ -257,6 +257,13 @@ run('normalizeMarkerRatios uses uniform directory spacing for five-marker virtua
   }), [0, 0.25, 0.5, 0.75, 1]);
 });
 
+run('normalizeMarkerRatios uses uniform directory spacing for high-count low-confidence virtual samples', () => {
+  const positions = [0, 707, 1427, 2144, 2860, 3575, 4292, 5009, 5725, 6440, 7158, 7874, 8591, 18000, 22000];
+  assert.deepEqual(normalizeMarkerRatios({
+    positions
+  }), positions.map((_, index) => index / (positions.length - 1)));
+});
+
 run('normalizeMarkerRatios does not preserve a sparse skewed previous virtual shape', () => {
   assert.deepEqual(normalizeMarkerRatios({
     positions: [110, 210, 310, 1310],
