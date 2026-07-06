@@ -73,12 +73,16 @@ class TimelineManager {
         // Debug perf
         this.debugPerf = false;
         try { this.debugPerf = (localStorage.getItem('chatgptTimelineDebugPerf') === '1'); } catch {}
+        this.debugLayout = false;
+        try { this.debugLayout = (localStorage.getItem('chatgptTimelineDebugLayout') === '1'); } catch {}
+        this.lastLayoutDebugKey = '';
         this.onVisualViewportResize = null;
         
         this.debouncedRecalculateAndRender = this.debounce(this.recalculateAndRenderMarkers, 350);
 
         // Summary cache: retain text when ChatGPT virtualizes off-screen elements
         this.summaryCache = new Map();
+        this.summarySaveTimer = null;
         // Star/Highlight feature state
         this.starred = new Set();
         this.markerMap = new Map();
@@ -118,10 +122,11 @@ class TimelineManager {
         this.injectTimelineUI();
         this.setupEventListeners();
         this.setupObservers();
+        this.conversationId = this.extractConversationIdFromPath(location.pathname);
+        this.loadSummaries();
         // Force an immediate first build so dots appear without waiting for mutations
         try { this.recalculateAndRenderMarkers(); } catch {}
         // Load persisted star markers for current conversation
-        this.conversationId = this.extractConversationIdFromPath(location.pathname);
         this.loadStars();
         // After loading stars, sync current markers/dots to reflect star state immediately
         try {
@@ -622,6 +627,17 @@ class TimelineManager {
                 const cid = this.conversationId;
                 if (!cid) return;
                 const expectedKey = `chatgptTimelineStars:${cid}`;
+                const summaryKey = `chatgptTimelineSummaries:${cid}`;
+                if (e.key === summaryKey) {
+                    this.loadSummaries();
+                    for (const marker of this.markers) {
+                        const text = this.summaryCache.get(marker.id);
+                        if (!text) continue;
+                        marker.summary = text;
+                        try { marker.dotElement?.setAttribute('aria-label', text); } catch {}
+                    }
+                    return;
+                }
                 if (e.key !== expectedKey) return;
 
                 // Parse new star set
@@ -834,8 +850,14 @@ class TimelineManager {
         const rawTop = targetRect.top - containerRect.top + this.scrollContainer.scrollTop;
         return InitialJumpUtils.resolveScrollTarget({
             rawTop,
-            focusOffset: this.getScrollFocusOffset()
+            focusOffset: this.getScrollFocusOffset(),
+            maxScrollTop: this.getMaxScrollTop()
         });
+    }
+
+    getMaxScrollTop() {
+        if (!this.scrollContainer) return 0;
+        return Math.max(0, (Number(this.scrollContainer.scrollHeight) || 0) - (Number(this.scrollContainer.clientHeight) || 0));
     }
 
     readComputedPixelValue(...values) {
@@ -974,10 +996,13 @@ class TimelineManager {
     queueOrRunTimelineJump(targetId) {
         const resolved = this.resolvePendingJumpTarget({ targetId });
         if (!resolved?.targetElement) return;
+        const targetScrollTop = this.getTargetScrollTop(resolved.targetElement);
         if (!InitialJumpUtils.shouldRunTimelineJump({
             targetId: resolved.targetId,
             activeTurnId: this.activeTurnId,
-            initialJumpReady: this.initialJumpReady
+            initialJumpReady: this.initialJumpReady,
+            currentScrollTop: this.scrollContainer?.scrollTop,
+            targetScrollTop
         })) {
             this.pendingInitialJump = null;
             return;
@@ -1150,10 +1175,14 @@ class TimelineManager {
     // Normalize whitespace and trim; remove leading SR-only prefixes like "You said:" / "你说："; no manual ellipsis
     normalizeText(text) {
         try {
+            if (InitialJumpUtils?.normalizeChatGPTTurnText) {
+                return InitialJumpUtils.normalizeChatGPTTurnText(text);
+            }
             let s = String(text || '').replace(/\s+/g, ' ').trim();
             // Strip only if it appears at the very start
             s = s.replace(/^\s*(you\s*said\s*[:：]?\s*)/i, '');
             s = s.replace(/^\s*((你说|您说|你說|您說)\s*[:：]?\s*)/, '');
+            s = s.replace(/(?:\s*(?:show\s+more|show\s+less|显示更多|顯示更多|显示较少|顯示較少|收起))+$/i, '').trim();
             return s;
         } catch {
             return '';
@@ -1172,7 +1201,7 @@ class TimelineManager {
                 if (!data || typeof data !== 'object') return;
                 for (const id of Object.keys(data)) {
                     const text = this.normalizeText(data[id] || '');
-                    if (text) this.summaryCache.set(id, text);
+                    if (text) this.rememberSummary(id, text);
                 }
             };
             document.addEventListener('timeline-fiber-result', handler, { once: true });
@@ -1190,7 +1219,7 @@ class TimelineManager {
         const id = el.dataset.turnId;
         // Priority 1: DOM text (most reliable when element is not virtualized)
         const domText = this.normalizeText(el.textContent || '');
-        if (domText) { this.summaryCache.set(id, domText); return domText; }
+        if (domText) { this.rememberSummary(id, domText); return domText; }
         // Priority 2: cached value (filled by fiber bridge or previous DOM reads)
         return this.summaryCache.get(id) || '';
     }
@@ -1398,6 +1427,84 @@ class TimelineManager {
         } else {
             this.sliderAlwaysVisible = false;
         }
+        this.maybeLogLayoutDebug('geometry');
+    }
+
+    getRatioSpread(ratios) {
+        try {
+            const gaps = [];
+            for (let i = 1; i < ratios.length; i++) {
+                const gap = Number(ratios[i]) - Number(ratios[i - 1]);
+                if (Number.isFinite(gap) && gap > 0) gaps.push(gap);
+            }
+            if (!gaps.length) return { minGapRatio: null, maxGapRatio: null, spread: null };
+            const minGapRatio = Math.min(...gaps);
+            const maxGapRatio = Math.max(...gaps);
+            return {
+                minGapRatio,
+                maxGapRatio,
+                spread: minGapRatio > 0 ? maxGapRatio / minGapRatio : null
+            };
+        } catch {
+            return { minGapRatio: null, maxGapRatio: null, spread: null };
+        }
+    }
+
+    buildLayoutDebugSnapshot(stage) {
+        const barRect = this.ui.timelineBar?.getBoundingClientRect?.();
+        const trackRect = this.ui.track?.getBoundingClientRect?.();
+        const baseRatios = this.markers.map(marker => marker.baseN ?? marker.n ?? 0);
+        const renderedDots = Array.from(this.ui.trackContent?.querySelectorAll?.('.timeline-dot') || []).slice(0, 12).map(dot => {
+            const rect = dot.getBoundingClientRect();
+            return {
+                id: dot.dataset.targetTurnId || '',
+                cssN: dot.style.getPropertyValue('--n') || '',
+                topViewport: Math.round(rect.top * 10) / 10,
+                topInBar: barRect ? Math.round((rect.top - barRect.top + rect.height / 2) * 10) / 10 : null
+            };
+        });
+        return {
+            stage,
+            href: location.href,
+            markerCount: this.markers.length,
+            activeTurnId: this.activeTurnId,
+            scrollTop: Math.round(Number(this.scrollContainer?.scrollTop) || 0),
+            scrollHeight: Math.round(Number(this.scrollContainer?.scrollHeight) || 0),
+            barHeight: Math.round(barRect?.height || 0),
+            trackHeight: Math.round(trackRect?.height || 0),
+            trackScrollTop: Math.round(Number(this.ui.track?.scrollTop) || 0),
+            contentHeight: Math.round(this.contentHeight || 0),
+            scale: Math.round((this.scale || 0) * 1000) / 1000,
+            usePixelTop: !!this.usePixelTop,
+            cssVarTopSupported: this._cssVarTopSupported,
+            minGap: this.getMinGap(),
+            padding: this.getTrackPadding(),
+            ratioSpread: this.getRatioSpread(baseRatios),
+            positions: this.markerScrollPositions.map(value => Math.round(Number(value) || 0)),
+            baseRatios: baseRatios.map(value => Math.round((Number(value) || 0) * 10000) / 10000),
+            visualRatios: this.markers.map(marker => Math.round((Number(marker.n) || 0) * 10000) / 10000),
+            yPositions: this.yPositions.map(value => Math.round((Number(value) || 0) * 10) / 10),
+            visibleRange: { ...this.visibleRange },
+            renderedDots
+        };
+    }
+
+    maybeLogLayoutDebug(stage) {
+        try {
+            if (!this.markers.length) return;
+            if (!this.debugLayout) return;
+            const key = [
+                stage,
+                this.markers.length,
+                Math.round(this.contentHeight || 0),
+                this.yPositions.slice(0, 4).map(value => Math.round((Number(value) || 0) * 10) / 10).join(',')
+            ].join('|');
+            if (key === this.lastLayoutDebugKey) return;
+            this.lastLayoutDebugKey = key;
+            console.warn('[ChatGPT Timeline Layout Debug]', this.buildLayoutDebugSnapshot(stage));
+        } catch (error) {
+            console.warn('[ChatGPT Timeline Layout Debug failed]', error);
+        }
     }
 
     detectCssVarTopSupport(pad, usableC) {
@@ -1515,6 +1622,7 @@ class TimelineManager {
         this.visibleRange = { start, end };
         // keep slider in sync with timeline scroll
         this.updateSlider();
+        this.maybeLogLayoutDebug('render');
     }
 
     lowerBound(arr, x) {
@@ -1710,7 +1818,10 @@ class TimelineManager {
         const positions = this.refreshMarkerScrollPositions();
         const activeIndex = InitialJumpUtils.selectActiveIndex({
             positions,
-            referenceY: ref
+            referenceY: ref,
+            scrollTop,
+            clientHeight: this.scrollContainer.clientHeight,
+            scrollHeight: this.scrollContainer.scrollHeight
         });
         const activeId = this.markers[activeIndex]?.id || this.markers[0].id;
         if (this.activeTurnId !== activeId) {
@@ -1821,7 +1932,12 @@ class TimelineManager {
         this.ui.sliderHandle = null;
         this.ui = { timelineBar: null, tooltip: null };
         this.markers = [];
+        this.saveSummaries();
         this.summaryCache.clear();
+        if (this.summarySaveTimer) {
+            try { clearTimeout(this.summarySaveTimer); } catch {}
+            this.summarySaveTimer = null;
+        }
         this.activeTurnId = null;
         this.scrollContainer = null;
         this.conversationContainer = null;
@@ -1869,6 +1985,51 @@ class TimelineManager {
             const arr = JSON.parse(raw);
             if (Array.isArray(arr)) arr.forEach(id => this.starred.add(String(id)));
         } catch {}
+    }
+
+    loadSummaries() {
+        this.summaryCache.clear();
+        const cid = this.conversationId;
+        if (!cid) return;
+        try {
+            const raw = localStorage.getItem(`chatgptTimelineSummaries:${cid}`);
+            if (!raw) return;
+            const data = JSON.parse(raw);
+            if (!data || typeof data !== 'object' || Array.isArray(data)) return;
+            Object.keys(data).forEach(id => {
+                const text = this.normalizeText(data[id] || '');
+                if (text) this.summaryCache.set(String(id), text);
+            });
+        } catch {}
+    }
+
+    saveSummaries() {
+        const cid = this.conversationId;
+        if (!cid) return;
+        try {
+            const entries = Array.from(this.summaryCache.entries())
+                .filter(([id, text]) => id && text)
+                .slice(-500);
+            localStorage.setItem(`chatgptTimelineSummaries:${cid}`, JSON.stringify(Object.fromEntries(entries)));
+        } catch {}
+    }
+
+    scheduleSummarySave() {
+        if (this.summarySaveTimer) return;
+        this.summarySaveTimer = setTimeout(() => {
+            this.summarySaveTimer = null;
+            this.saveSummaries();
+        }, 250);
+    }
+
+    rememberSummary(id, text) {
+        const key = String(id || '').trim();
+        const value = this.normalizeText(text || '');
+        if (!key || !value) return false;
+        if (this.summaryCache.get(key) === value) return false;
+        this.summaryCache.set(key, value);
+        this.scheduleSummarySave();
+        return true;
     }
 
     saveStars() {

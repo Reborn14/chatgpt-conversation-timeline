@@ -12,7 +12,8 @@ const {
   resolveScrollFocusOffset,
   resolveScrollTarget,
   shouldRunTimelineJump,
-  selectActiveIndex
+  selectActiveIndex,
+  normalizeChatGPTTurnText
 } = require('../extension/chatgpt-initial-jump-utils.js');
 
 function run(name, fn) {
@@ -98,6 +99,14 @@ run('resolveScrollTarget subtracts the shared focus offset from raw target top',
   }), 924);
 });
 
+run('resolveScrollTarget clamps unreachable bottom targets to the maximum scroll top', () => {
+  assert.equal(resolveScrollTarget({
+    rawTop: 21800,
+    focusOffset: 76,
+    maxScrollTop: 21214
+  }), 21214);
+});
+
 run('resolveActiveReferenceY uses the same focus line as controlled jumps', () => {
   assert.equal(resolveActiveReferenceY({
     scrollTop: 924,
@@ -130,11 +139,42 @@ run('shouldRunTimelineJump ignores clicks on the already active marker after rea
   }), false);
 });
 
+run('shouldRunTimelineJump allows active marker clicks when the page is not at its target', () => {
+  assert.equal(shouldRunTimelineJump({
+    targetId: 'turn-4',
+    activeTurnId: 'turn-4',
+    initialJumpReady: true,
+    currentScrollTop: 1600,
+    targetScrollTop: 2200
+  }), true);
+});
+
+run('normalizeChatGPTTurnText removes trailing ChatGPT collapse control labels', () => {
+  assert.equal(
+    normalizeChatGPTTurnText('你现在可以 grill me 或者向我泼冷水/质疑这个方案 Show more Show less'),
+    '你现在可以 grill me 或者向我泼冷水/质疑这个方案'
+  );
+  assert.equal(
+    normalizeChatGPTTurnText('You said: keep the real message Show moreShow less'),
+    'keep the real message'
+  );
+});
+
 run('selectActiveIndex uses measured live positions instead of stale visible hints', () => {
   assert.equal(selectActiveIndex({
     positions: [100, 300, 900],
     visibleIndices: [0],
     referenceY: 920
+  }), 2);
+});
+
+run('selectActiveIndex chooses the last marker at the scroll bottom', () => {
+  assert.equal(selectActiveIndex({
+    positions: [100, 300, 900],
+    referenceY: 650,
+    scrollTop: 1200,
+    clientHeight: 600,
+    scrollHeight: 1800
   }), 2);
 });
 
@@ -180,11 +220,18 @@ run('normalizeMarkerRatios keeps previous stable ratios when live anchors are no
   }), [0, 0.24, 0.48, 1]);
 });
 
-run('normalizeMarkerRatios falls back to zeros when bad anchors have no stable previous ratios', () => {
+run('normalizeMarkerRatios falls back to readable spacing when bad anchors have no stable previous ratios', () => {
   assert.deepEqual(normalizeMarkerRatios({
     positions: [120, 620, 590, 2220],
     previous: [undefined, undefined, undefined, undefined]
-  }), [0, 0, 0, 0]);
+  }), [0, 1 / 3, 2 / 3, 1]);
+});
+
+run('normalizeMarkerRatios does not preserve a collapsed previous shape', () => {
+  assert.deepEqual(normalizeMarkerRatios({
+    positions: [120, 620, 590],
+    previous: [0, 0, 0]
+  }), [0, 0.5, 1]);
 });
 
 run('normalizeMarkerRatios keeps previous stable ratios when a delayed rebuild is severely skewed', () => {
@@ -195,11 +242,52 @@ run('normalizeMarkerRatios keeps previous stable ratios when a delayed rebuild i
   }), [0, 1 / 3, 2 / 3, 1]);
 });
 
-run('normalizeMarkerRatios accepts skewed ratios when there is no previous stable shape', () => {
+run('normalizeMarkerRatios falls back to readable spacing for sparse skewed virtual samples', () => {
   assert.deepEqual(normalizeMarkerRatios({
     positions: [100, 200, 300, 1300],
     preservePreviousOnSkew: true
-  }), [0, 1 / 12, 1 / 6, 1]);
+  }), [0, 1 / 3, 2 / 3, 1]);
+});
+
+run('normalizeMarkerRatios falls back for first sparse skewed virtual sample without previous state', () => {
+  assert.deepEqual(normalizeMarkerRatios({
+    positions: [-12, 707, 7288, 18591]
+  }), [0, 1 / 3, 2 / 3, 1]);
+});
+
+run('normalizeMarkerRatios uses uniform directory spacing for low-confidence virtual samples', () => {
+  assert.deepEqual(normalizeMarkerRatios({
+    positions: [0, 720, 1440, 2160, 2880, 10000, 18591]
+  }), [0, 1 / 6, 2 / 6, 3 / 6, 4 / 6, 5 / 6, 1]);
+});
+
+run('normalizeMarkerRatios uses uniform directory spacing for five-marker virtual samples', () => {
+  assert.deepEqual(normalizeMarkerRatios({
+    positions: [0, 707, 1427, 13005, 16272]
+  }), [0, 0.25, 0.5, 0.75, 1]);
+});
+
+run('normalizeMarkerRatios uses uniform directory spacing for high-count low-confidence virtual samples', () => {
+  const positions = [0, 707, 1427, 2144, 2860, 3575, 4292, 5009, 5725, 6440, 7158, 7874, 8591, 18000, 22000];
+  assert.deepEqual(normalizeMarkerRatios({
+    positions
+  }), positions.map((_, index) => index / (positions.length - 1)));
+});
+
+run('normalizeMarkerRatios does not preserve a sparse skewed previous virtual shape', () => {
+  assert.deepEqual(normalizeMarkerRatios({
+    positions: [110, 210, 310, 1310],
+    previous: [0, 1 / 12, 1 / 6, 1],
+    preservePreviousOnSkew: true
+  }), [0, 1 / 3, 2 / 3, 1]);
+});
+
+run('normalizeMarkerRatios accepts skewed ratios once the sample is large enough', () => {
+  const positions = [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100, 1300, 1600];
+  assert.deepEqual(normalizeMarkerRatios({
+    positions,
+    preservePreviousOnSkew: true
+  }), positions.map(position => (position - 100) / 1500));
 });
 
 run('normalizeMarkerRatios keeps a single marker renderable without a previous ratio', () => {
@@ -247,6 +335,24 @@ run('calculateTimelineContentHeight keeps the viewport height when proportional 
     minGap: 24,
     markerRatios: [0, 0.25, 0.5, 0.75, 1]
   }), 651);
+});
+
+run('calculateTimelineContentHeight avoids huge expansion for sparse virtualized marker samples', () => {
+  assert.equal(calculateTimelineContentHeight({
+    viewportHeight: 651,
+    padding: 16,
+    minGap: 24,
+    markerRatios: [0, 0.003, 0.21, 1]
+  }), 651);
+});
+
+run('calculateTimelineContentHeight avoids slight overflow for sparse virtual samples', () => {
+  assert.equal(calculateTimelineContentHeight({
+    viewportHeight: 619,
+    padding: 16,
+    minGap: 24,
+    markerRatios: [0, 0.038664564953497634, 0.3923946554639225, 1]
+  }), 619);
 });
 
 run('pickBestScrollableCandidate prefers the nearest real non-document scroll root', () => {
