@@ -115,7 +115,14 @@
     const targetId = String(input.targetId || '').trim();
     const activeTurnId = String(input.activeTurnId || '').trim();
     if (!targetId) return false;
-    if (activeTurnId && targetId === activeTurnId) return false;
+    if (activeTurnId && targetId === activeTurnId) {
+      if (!input.initialJumpReady) return false;
+      const currentScrollTop = Number(input.currentScrollTop);
+      const targetScrollTop = Number(input.targetScrollTop);
+      const epsilon = Math.max(0, Number(input.epsilon) || 2);
+      if (!Number.isFinite(currentScrollTop) || !Number.isFinite(targetScrollTop)) return false;
+      return Math.abs(targetScrollTop - currentScrollTop) > epsilon;
+    }
     return true;
   }
 

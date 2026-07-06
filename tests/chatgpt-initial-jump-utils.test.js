@@ -139,6 +139,16 @@ run('shouldRunTimelineJump ignores clicks on the already active marker after rea
   }), false);
 });
 
+run('shouldRunTimelineJump allows active marker clicks when the page is not at its target', () => {
+  assert.equal(shouldRunTimelineJump({
+    targetId: 'turn-4',
+    activeTurnId: 'turn-4',
+    initialJumpReady: true,
+    currentScrollTop: 1600,
+    targetScrollTop: 2200
+  }), true);
+});
+
 run('normalizeChatGPTTurnText removes trailing ChatGPT collapse control labels', () => {
   assert.equal(
     normalizeChatGPTTurnText('你现在可以 grill me 或者向我泼冷水/质疑这个方案 Show more Show less'),

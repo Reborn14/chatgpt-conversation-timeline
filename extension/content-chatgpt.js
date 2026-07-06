@@ -82,6 +82,7 @@ class TimelineManager {
 
         // Summary cache: retain text when ChatGPT virtualizes off-screen elements
         this.summaryCache = new Map();
+        this.summarySaveTimer = null;
         // Star/Highlight feature state
         this.starred = new Set();
         this.markerMap = new Map();
@@ -121,10 +122,11 @@ class TimelineManager {
         this.injectTimelineUI();
         this.setupEventListeners();
         this.setupObservers();
+        this.conversationId = this.extractConversationIdFromPath(location.pathname);
+        this.loadSummaries();
         // Force an immediate first build so dots appear without waiting for mutations
         try { this.recalculateAndRenderMarkers(); } catch {}
         // Load persisted star markers for current conversation
-        this.conversationId = this.extractConversationIdFromPath(location.pathname);
         this.loadStars();
         // After loading stars, sync current markers/dots to reflect star state immediately
         try {
@@ -625,6 +627,17 @@ class TimelineManager {
                 const cid = this.conversationId;
                 if (!cid) return;
                 const expectedKey = `chatgptTimelineStars:${cid}`;
+                const summaryKey = `chatgptTimelineSummaries:${cid}`;
+                if (e.key === summaryKey) {
+                    this.loadSummaries();
+                    for (const marker of this.markers) {
+                        const text = this.summaryCache.get(marker.id);
+                        if (!text) continue;
+                        marker.summary = text;
+                        try { marker.dotElement?.setAttribute('aria-label', text); } catch {}
+                    }
+                    return;
+                }
                 if (e.key !== expectedKey) return;
 
                 // Parse new star set
@@ -983,10 +996,13 @@ class TimelineManager {
     queueOrRunTimelineJump(targetId) {
         const resolved = this.resolvePendingJumpTarget({ targetId });
         if (!resolved?.targetElement) return;
+        const targetScrollTop = this.getTargetScrollTop(resolved.targetElement);
         if (!InitialJumpUtils.shouldRunTimelineJump({
             targetId: resolved.targetId,
             activeTurnId: this.activeTurnId,
-            initialJumpReady: this.initialJumpReady
+            initialJumpReady: this.initialJumpReady,
+            currentScrollTop: this.scrollContainer?.scrollTop,
+            targetScrollTop
         })) {
             this.pendingInitialJump = null;
             return;
@@ -1185,7 +1201,7 @@ class TimelineManager {
                 if (!data || typeof data !== 'object') return;
                 for (const id of Object.keys(data)) {
                     const text = this.normalizeText(data[id] || '');
-                    if (text) this.summaryCache.set(id, text);
+                    if (text) this.rememberSummary(id, text);
                 }
             };
             document.addEventListener('timeline-fiber-result', handler, { once: true });
@@ -1203,7 +1219,7 @@ class TimelineManager {
         const id = el.dataset.turnId;
         // Priority 1: DOM text (most reliable when element is not virtualized)
         const domText = this.normalizeText(el.textContent || '');
-        if (domText) { this.summaryCache.set(id, domText); return domText; }
+        if (domText) { this.rememberSummary(id, domText); return domText; }
         // Priority 2: cached value (filled by fiber bridge or previous DOM reads)
         return this.summaryCache.get(id) || '';
     }
@@ -1916,7 +1932,12 @@ class TimelineManager {
         this.ui.sliderHandle = null;
         this.ui = { timelineBar: null, tooltip: null };
         this.markers = [];
+        this.saveSummaries();
         this.summaryCache.clear();
+        if (this.summarySaveTimer) {
+            try { clearTimeout(this.summarySaveTimer); } catch {}
+            this.summarySaveTimer = null;
+        }
         this.activeTurnId = null;
         this.scrollContainer = null;
         this.conversationContainer = null;
@@ -1964,6 +1985,51 @@ class TimelineManager {
             const arr = JSON.parse(raw);
             if (Array.isArray(arr)) arr.forEach(id => this.starred.add(String(id)));
         } catch {}
+    }
+
+    loadSummaries() {
+        this.summaryCache.clear();
+        const cid = this.conversationId;
+        if (!cid) return;
+        try {
+            const raw = localStorage.getItem(`chatgptTimelineSummaries:${cid}`);
+            if (!raw) return;
+            const data = JSON.parse(raw);
+            if (!data || typeof data !== 'object' || Array.isArray(data)) return;
+            Object.keys(data).forEach(id => {
+                const text = this.normalizeText(data[id] || '');
+                if (text) this.summaryCache.set(String(id), text);
+            });
+        } catch {}
+    }
+
+    saveSummaries() {
+        const cid = this.conversationId;
+        if (!cid) return;
+        try {
+            const entries = Array.from(this.summaryCache.entries())
+                .filter(([id, text]) => id && text)
+                .slice(-500);
+            localStorage.setItem(`chatgptTimelineSummaries:${cid}`, JSON.stringify(Object.fromEntries(entries)));
+        } catch {}
+    }
+
+    scheduleSummarySave() {
+        if (this.summarySaveTimer) return;
+        this.summarySaveTimer = setTimeout(() => {
+            this.summarySaveTimer = null;
+            this.saveSummaries();
+        }, 250);
+    }
+
+    rememberSummary(id, text) {
+        const key = String(id || '').trim();
+        const value = this.normalizeText(text || '');
+        if (!key || !value) return false;
+        if (this.summaryCache.get(key) === value) return false;
+        this.summaryCache.set(key, value);
+        this.scheduleSummarySave();
+        return true;
     }
 
     saveStars() {
