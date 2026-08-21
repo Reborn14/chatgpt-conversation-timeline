@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "ChatGPT Conversation Timeline",
   "version": "3.3.0",
-  "description": "Adds a navigation timeline to your ChatGPT, DeepSeek, and Gemini conversations for easy navigation.",
+  "description": "Adds a navigation timeline to your ChatGPT, DeepSeek, Copilot, and Gemini conversations for easy navigation.",
   "action": {
     "default_popup": "popup.html",
     "default_title": "会话时间轴"
@@ -46,6 +46,13 @@
       ],
       "js": ["content-gemini.js"],
       "css": ["styles-gemini.css"]
+    },
+    {
+      "matches": [
+        "https://copilot.microsoft.com/*"
+      ],
+      "js": ["content-copilot.js"],
+      "css": ["styles-copilot.css"]
     }
   ]
 }

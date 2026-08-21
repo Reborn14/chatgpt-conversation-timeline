@@ -42,6 +42,7 @@ body.boot .switch::after { transition: none !important; }
 .provider-item { display:flex; align-items:center; justify-content: space-between; padding: 10px 0; }
 .provider-left { display:flex; align-items:center; gap:10px; }
 .provider-icon { width: 18px; height:18px; color: var(--text); }
+.provider-icon.img { width: 18px; height: 18px; object-fit: contain; }
 .provider-name { font-size: 14px; font-weight: 500; color: var(--text); }
 
 .switch-wrapper { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
