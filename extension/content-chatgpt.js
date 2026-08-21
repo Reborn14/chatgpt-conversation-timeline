@@ -1,3 +1,5 @@
+const InitialJumpUtils = globalThis.ChatGPTInitialJumpUtils;
+
 class TimelineManager {
     constructor() {
         this.scrollContainer = null;
@@ -21,6 +23,19 @@ class TimelineManager {
         this.onWindowResize = null;
         this.onTimelineWheel = null;
         this.scrollRafId = null;
+        this.smoothScrollRafId = null;
+        this.smoothScrollSession = 0;
+        this.scrollCorrectionRafId = null;
+        this.scrollCorrectionSession = 0;
+        this.initialJumpRafId = null;
+        this.initialJumpReady = false;
+        this.initialJumpStableFrames = 0;
+        this.initialJumpMetrics = null;
+        this.initialJumpStartedAt = 0;
+        this.initialJumpReadyDeadline = 0;
+        this.pendingInitialJump = null;
+        this.scrollAnchoringRestoreValue = null;
+        this.scrollAnchoringLockCount = 0;
         this.lastActiveChangeTime = 0;
         this.minActiveChangeInterval = 120; // ms
         this.pendingActiveId = null;
@@ -38,6 +53,7 @@ class TimelineManager {
         this.scale = 1;
         this.contentHeight = 0;
         this.yPositions = [];
+        this.markerScrollPositions = [];
         this.visibleRange = { start: 0, end: -1 };
         this.firstUserTurnOffset = 0;
         this.contentSpanPx = 1;
@@ -61,6 +77,8 @@ class TimelineManager {
         
         this.debouncedRecalculateAndRender = this.debounce(this.recalculateAndRenderMarkers, 350);
 
+        // Summary cache: retain text when ChatGPT virtualizes off-screen elements
+        this.summaryCache = new Map();
         // Star/Highlight feature state
         this.starred = new Set();
         this.markerMap = new Map();
@@ -73,6 +91,7 @@ class TimelineManager {
         this.pressStartPos = null;
         this.pressTargetDot = null;
         this.suppressClickUntil = 0;
+        this.suppressActiveUntil = 0;
         // Cross-tab sync
         this.onStorage = null;
     }
@@ -121,24 +140,28 @@ class TimelineManager {
             }
         } catch {}
         // Initial rendering will be triggered by observers; avoid duplicate delayed re-render
+        this.startInitialJumpReadinessWatch();
     }
-    
+
     async findCriticalElements() {
         const firstTurn = await this.waitForElement('[data-turn-id]');
         if (!firstTurn) return false;
-        
-        this.conversationContainer = firstTurn.parentElement;
+
+        // Find lowest common ancestor that contains ALL turn elements
+        const allTurns = document.querySelectorAll('[data-turn-id]');
+        let root = firstTurn.parentElement;
+        while (root && root !== document.body) {
+            let allInside = true;
+            for (let i = 0; i < allTurns.length; i++) {
+                if (!root.contains(allTurns[i])) { allInside = false; break; }
+            }
+            if (allInside) break;
+            root = root.parentElement;
+        }
+        this.conversationContainer = root || firstTurn.parentElement;
         if (!this.conversationContainer) return false;
 
-        let parent = this.conversationContainer;
-        while (parent && parent !== document.body) {
-            const style = window.getComputedStyle(parent);
-            if (style.overflowY === 'auto' || style.overflowY === 'scroll') {
-                this.scrollContainer = parent;
-                break;
-            }
-            parent = parent.parentElement;
-        }
+        this.scrollContainer = this.getScrollableAncestor(this.conversationContainer);
         return this.scrollContainer !== null;
     }
     
@@ -243,33 +266,38 @@ class TimelineManager {
             return;
         }
         if (this.zeroTurnsTimer) { try { clearTimeout(this.zeroTurnsTimer); } catch {} this.zeroTurnsTimer = null; }
+        // Extract React fiber text for virtualized elements before building markers
+        try { this.extractFiberTexts(); } catch {}
         // Clear old dots from track/content (now that we know content exists)
         (this.ui.trackContent || this.ui.timelineBar).querySelectorAll('.timeline-dot').forEach(n => n.remove());
 
-        let contentSpan;
-        const firstTurnOffset = userTurnElements[0].offsetTop;
-        if (userTurnElements.length < 2) {
-            contentSpan = 1;
-        } else {
-            const lastTurnOffset = userTurnElements[userTurnElements.length - 1].offsetTop;
-            contentSpan = lastTurnOffset - firstTurnOffset;
-        }
-        if (contentSpan <= 0) contentSpan = 1;
+        const turnElements = Array.from(userTurnElements);
+        const measuredPositions = turnElements.map(el => this.getElementScrollAnchorTop(el));
+        const firstTurnOffset = measuredPositions[0] || 0;
+        const lastTurnOffset = measuredPositions[measuredPositions.length - 1] || firstTurnOffset;
+        const contentSpan = Math.max(1, lastTurnOffset - firstTurnOffset);
+        const previousRatiosById = new Map(this.markers.map(marker => [marker.id, marker.baseN ?? marker.n ?? 0]));
+        const previousRatios = turnElements.map(el => previousRatiosById.get(el.dataset.turnId));
+        const markerRatios = InitialJumpUtils.normalizeMarkerRatios({
+            positions: measuredPositions,
+            previous: previousRatios,
+            preservePreviousOnSkew: previousRatiosById.size > 0
+        });
 
         // Cache for scroll mapping
         this.firstUserTurnOffset = firstTurnOffset;
         this.contentSpanPx = contentSpan;
+        this.markerScrollPositions = measuredPositions;
 
         // Build markers with normalized position along conversation
         this.markerMap.clear();
-        this.markers = Array.from(userTurnElements).map(el => {
-            const offsetFromStart = el.offsetTop - firstTurnOffset;
-            let n = offsetFromStart / contentSpan;
+        this.markers = turnElements.map((el, index) => {
+            let n = markerRatios[index];
             n = Math.max(0, Math.min(1, n));
             const m = {
                 id: el.dataset.turnId,
                 element: el,
-                summary: this.normalizeText(el.textContent || ''),
+                summary: this.resolveSummary(el),
                 n,
                 baseN: n,
                 dotElement: null,
@@ -350,7 +378,17 @@ class TimelineManager {
     ensureContainersUpToDate() {
         const first = document.querySelector('[data-turn-id]');
         if (!first) return;
-        const newConv = first.parentElement;
+        // Find lowest common ancestor containing all turns (same logic as findCriticalElements)
+        const allTurns = document.querySelectorAll('[data-turn-id]');
+        let newConv = first.parentElement;
+        while (newConv && newConv !== document.body) {
+            let allInside = true;
+            for (let i = 0; i < allTurns.length; i++) {
+                if (!newConv.contains(allTurns[i])) { allInside = false; break; }
+            }
+            if (allInside) break;
+            newConv = newConv.parentElement;
+        }
         if (newConv && newConv !== this.conversationContainer) {
             // Rebind observers and listeners to the new conversation root
             this.rebindConversationContainer(newConv);
@@ -368,20 +406,11 @@ class TimelineManager {
 
         this.conversationContainer = newConv;
 
-        // Find (or re-find) scroll container
-        let parent = newConv;
-        let newScroll = null;
-        while (parent && parent !== document.body) {
-            const style = window.getComputedStyle(parent);
-            if (style.overflowY === 'auto' || style.overflowY === 'scroll') {
-                newScroll = parent; break;
-            }
-            parent = parent.parentElement;
-        }
-        if (!newScroll) newScroll = document.scrollingElement || document.documentElement || document.body;
-        this.scrollContainer = newScroll;
+        this.scrollContainer = this.getScrollableAncestor(newConv);
         // Reattach scroll listener
-        this.onScroll = () => this.scheduleScrollSync();
+        this.onScroll = () => {
+            this.scheduleScrollSync();
+        };
         this.scrollContainer.addEventListener('scroll', this.onScroll, { passive: true });
 
         // Recreate IntersectionObserver with new root
@@ -423,7 +452,7 @@ class TimelineManager {
                 const targetElement = this.conversationContainer.querySelector(`[data-turn-id="${targetId}"]`);
                 if (targetElement) {
                     // Only scroll; let scroll-based computation set active to avoid double-flash
-                    this.smoothScrollTo(targetElement);
+                    this.queueOrRunTimelineJump(targetId);
                 }
             }
         };
@@ -472,7 +501,9 @@ class TimelineManager {
             this.ui.timelineBar.addEventListener('pointerleave', this.onPointerLeave);
         } catch {}
         // Listen to container scroll to keep marker active state in sync
-        this.onScroll = () => this.scheduleScrollSync();
+        this.onScroll = () => {
+            this.scheduleScrollSync();
+        };
         this.scrollContainer.addEventListener('scroll', this.onScroll, { passive: true });
 
         // Tooltip interactions (delegated)
@@ -635,28 +666,457 @@ class TimelineManager {
         try { window.addEventListener('storage', this.onStorage); } catch {}
     }
     
-    smoothScrollTo(targetElement, duration = 600) {
+    cancelSmoothScroll() {
+        this.smoothScrollSession++;
+        if (this.smoothScrollRafId !== null) {
+            try { cancelAnimationFrame(this.smoothScrollRafId); } catch {}
+            this.smoothScrollRafId = null;
+        }
+        this.isScrolling = false;
+        this.unlockScrollAnchoring();
+    }
+
+    cancelScrollCorrection() {
+        this.scrollCorrectionSession = (Number(this.scrollCorrectionSession) || 0) + 1;
+        if (this.scrollCorrectionRafId !== null) {
+            try { cancelAnimationFrame(this.scrollCorrectionRafId); } catch {}
+            this.scrollCorrectionRafId = null;
+        }
+        this.unlockScrollAnchoring();
+    }
+
+    cancelInitialJumpReadinessWatch() {
+        if (this.initialJumpRafId !== null) {
+            try { cancelAnimationFrame(this.initialJumpRafId); } catch {}
+            this.initialJumpRafId = null;
+        }
+    }
+
+    lockScrollAnchoring() {
+        if (!this.scrollContainer) return;
+        this.scrollAnchoringLockCount = Math.max(0, Number(this.scrollAnchoringLockCount) || 0) + 1;
+        if (this.scrollAnchoringLockCount > 1) return;
+        try {
+            this.scrollAnchoringRestoreValue = this.scrollContainer.style.overflowAnchor || '';
+            this.scrollContainer.style.overflowAnchor = InitialJumpUtils.resolveScrollAnchoring({
+                active: true,
+                fallback: this.scrollAnchoringRestoreValue
+            });
+        } catch {}
+    }
+
+    isElementScrollable(el) {
+        if (!el) return false;
+        try {
+            const style = window.getComputedStyle(el);
+            const overflowY = String(style.overflowY || '').toLowerCase();
+            const allowed = overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay';
+            const isDocument = el === document.scrollingElement || el === document.documentElement || el === document.body;
+            if (!allowed && !isDocument) return false;
+            if ((el.scrollHeight - el.clientHeight) > 4) return true;
+            const previous = el.scrollTop;
+            el.scrollTop = previous + 1;
+            const changed = el.scrollTop !== previous;
+            el.scrollTop = previous;
+            return changed;
+        } catch {
+            return false;
+        }
+    }
+
+    getScrollableAncestor(startEl) {
+        const candidates = [];
+        let node = startEl;
+        let depth = 0;
+        while (node && node !== document.body) {
+            if (this.isElementScrollable(node)) {
+                candidates.push({
+                    element: node,
+                    overflow: Math.max(0, (node.scrollHeight || 0) - (node.clientHeight || 0)),
+                    isDocument: false,
+                    depth
+                });
+            }
+            node = node.parentElement;
+            depth++;
+        }
+        const documentScroll = document.scrollingElement || document.documentElement || document.body;
+        if (this.isElementScrollable(documentScroll)) {
+            candidates.push({
+                element: documentScroll,
+                overflow: Math.max(0, (documentScroll.scrollHeight || 0) - (documentScroll.clientHeight || 0)),
+                isDocument: true,
+                depth: Number.MAX_SAFE_INTEGER
+            });
+        }
+        const best = InitialJumpUtils.pickBestScrollableCandidate(candidates);
+        return best?.element || documentScroll;
+    }
+
+    unlockScrollAnchoring() {
+        if (!this.scrollContainer) {
+            this.scrollAnchoringLockCount = 0;
+            this.scrollAnchoringRestoreValue = null;
+            return;
+        }
+        this.scrollAnchoringLockCount = Math.max(0, Number(this.scrollAnchoringLockCount) || 0);
+        if (this.scrollAnchoringLockCount === 0) return;
+        this.scrollAnchoringLockCount--;
+        if (this.scrollAnchoringLockCount > 0) return;
+        try {
+            this.scrollContainer.style.overflowAnchor = InitialJumpUtils.resolveScrollAnchoring({
+                active: false,
+                fallback: this.scrollAnchoringRestoreValue
+            });
+            if (!this.scrollAnchoringRestoreValue) {
+                try { this.scrollContainer.style.removeProperty('overflow-anchor'); } catch {}
+            }
+        } catch {}
+        this.scrollAnchoringRestoreValue = null;
+    }
+
+    resolvePendingJumpTarget(pending = this.pendingInitialJump) {
+        const targetId = String(pending?.targetId || '').trim();
+        if (!targetId || !this.conversationContainer) return null;
+        const turnElement = this.conversationContainer.querySelector(`[data-turn-id="${CSS.escape(targetId)}"]`);
+        const targetElement = this.resolveTurnScrollAnchor(turnElement);
+        if (!targetElement) return null;
+        return { targetId, turnElement, targetElement };
+    }
+
+    resolveTurnScrollAnchor(turnElement) {
+        if (!turnElement) return null;
+        const textSelectors = [
+            '.whitespace-pre-wrap',
+            '[dir="auto"]',
+            '.markdown',
+            'p',
+            'pre'
+        ];
+        let textAnchor = null;
+        for (const selector of textSelectors) {
+            try {
+                const candidates = Array.from(turnElement.querySelectorAll(selector));
+                for (const candidate of candidates) {
+                    const text = String(candidate.innerText || candidate.textContent || '').replace(/\s+/g, ' ').trim();
+                    if (!text) continue;
+                    textAnchor = candidate;
+                    break;
+                }
+            } catch {}
+            if (textAnchor) break;
+        }
+        if (!textAnchor) return turnElement;
+
+        let bubbleAnchor = textAnchor;
+        let node = textAnchor;
+        while (node && node !== turnElement) {
+            try {
+                const style = getComputedStyle(node);
+                const backgroundColor = String(style.backgroundColor || '').trim().toLowerCase();
+                const hasBackground = backgroundColor && backgroundColor !== 'rgba(0, 0, 0, 0)' && backgroundColor !== 'transparent';
+                const radius = parseFloat(style.borderTopLeftRadius || '0') || 0;
+                const hasBorder = (parseFloat(style.borderTopWidth || '0') || 0) > 0;
+                const hasPadding = ((parseFloat(style.paddingTop || '0') || 0) + (parseFloat(style.paddingBottom || '0') || 0)) > 0;
+                if ((hasBackground || hasBorder) && (radius > 0 || hasPadding)) {
+                    bubbleAnchor = node;
+                }
+            } catch {}
+            node = node.parentElement;
+        }
+        return bubbleAnchor || textAnchor || turnElement;
+    }
+
+    getTargetScrollTop(targetElement) {
+        if (!this.scrollContainer || !targetElement) return NaN;
         const containerRect = this.scrollContainer.getBoundingClientRect();
         const targetRect = targetElement.getBoundingClientRect();
-        const targetPosition = targetRect.top - containerRect.top + this.scrollContainer.scrollTop;
-        const startPosition = this.scrollContainer.scrollTop;
-        const distance = targetPosition - startPosition;
-        let startTime = null;
+        const rawTop = targetRect.top - containerRect.top + this.scrollContainer.scrollTop;
+        return InitialJumpUtils.resolveScrollTarget({
+            rawTop,
+            focusOffset: this.getScrollFocusOffset()
+        });
+    }
 
+    readComputedPixelValue(...values) {
+        for (const value of values) {
+            const text = String(value || '').trim();
+            if (!text) continue;
+            const n = parseFloat(text);
+            if (Number.isFinite(n)) return n;
+        }
+        return 0;
+    }
+
+    getScrollFocusOffset() {
+        if (!this.scrollContainer) return 2;
+        try {
+            const style = getComputedStyle(this.scrollContainer);
+            const containerScrollPaddingTop = this.readComputedPixelValue(
+                style.getPropertyValue?.('scroll-padding-top'),
+                style.getPropertyValue?.('--sticky-padding-top')
+            );
+            return InitialJumpUtils.resolveScrollFocusOffset({
+                containerScrollPaddingTop,
+                fallbackOffset: 2,
+                gapOffset: 12
+            });
+        } catch {
+            return 14;
+        }
+    }
+
+    getActiveReferenceY(scrollTop = this.scrollContainer?.scrollTop || 0) {
+        return InitialJumpUtils.resolveActiveReferenceY({
+            scrollTop,
+            focusOffset: this.getScrollFocusOffset(),
+            epsilon: 2
+        });
+    }
+
+    getElementScrollAnchorTop(targetElement) {
+        const anchorElement = this.resolveTurnScrollAnchor(targetElement);
+        const top = this.getTargetScrollTop(anchorElement);
+        if (Number.isFinite(top)) return top;
+        try { return Number(targetElement?.offsetTop) || 0; } catch { return 0; }
+    }
+
+    refreshMarkerScrollPositions() {
+        if (!this.markers.length) {
+            this.markerScrollPositions = [];
+            return this.markerScrollPositions;
+        }
+        const positions = this.markers.map(marker => this.getElementScrollAnchorTop(marker.element));
+        this.markerScrollPositions = positions;
+        const first = positions[0] || 0;
+        const last = positions[positions.length - 1] || first;
+        this.firstUserTurnOffset = first;
+        this.contentSpanPx = Math.max(1, last - first);
+        return positions;
+    }
+
+    captureInitialJumpMetrics() {
+        if (!this.scrollContainer) return null;
+        const pendingTarget = this.resolvePendingJumpTarget();
+        let anchorTop = pendingTarget?.targetElement ? this.getTargetScrollTop(pendingTarget.targetElement) : NaN;
+        if (!Number.isFinite(anchorTop)) {
+            const probeTarget = this.markers[0]?.element || this.conversationContainer?.querySelector?.('[data-turn="user"][data-turn-id]');
+            anchorTop = this.getTargetScrollTop(probeTarget);
+        }
+        return {
+            scrollTop: Number(this.scrollContainer.scrollTop) || 0,
+            scrollHeight: Number(this.scrollContainer.scrollHeight) || 0,
+            anchorTop: Number.isFinite(anchorTop) ? anchorTop : 0
+        };
+    }
+
+    markInitialJumpReady(reason = 'stable') {
+        if (this.initialJumpReady) return;
+        this.initialJumpReady = true;
+        this.initialJumpStableFrames = 0;
+        this.initialJumpMetrics = null;
+        this.initialJumpStartedAt = 0;
+        this.initialJumpReadyDeadline = 0;
+        this.cancelInitialJumpReadinessWatch();
+        if (!this.pendingInitialJump) return;
+        const pending = this.resolvePendingJumpTarget();
+        this.pendingInitialJump = null;
+        if (pending?.targetElement) {
+            this.activeTurnId = pending.targetId;
+            this.pendingActiveId = null;
+            this.updateActiveDotUI();
+            this.smoothScrollTo(pending.targetElement);
+        }
+    }
+
+    startInitialJumpReadinessWatch() {
+        if (this.initialJumpReady || !this.scrollContainer) return;
+        if (!this.initialJumpReadyDeadline) {
+            const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+            this.initialJumpStartedAt = now;
+            this.initialJumpReadyDeadline = now + 1600;
+        }
+        if (this.initialJumpRafId !== null) return;
+
+        const tick = () => {
+            this.initialJumpRafId = null;
+            if (this.initialJumpReady || !this.scrollContainer) return;
+            const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+            const currentMetrics = this.captureInitialJumpMetrics();
+            const previousMetrics = this.initialJumpMetrics;
+            this.initialJumpMetrics = currentMetrics;
+            const readiness = InitialJumpUtils.evaluateInitialJumpReadiness({
+                stableFrames: this.initialJumpStableFrames,
+                previousScrollTop: previousMetrics?.scrollTop,
+                currentScrollTop: currentMetrics?.scrollTop,
+                previousScrollHeight: previousMetrics?.scrollHeight,
+                currentScrollHeight: currentMetrics?.scrollHeight,
+                previousAnchorTop: previousMetrics?.anchorTop,
+                currentAnchorTop: currentMetrics?.anchorTop,
+                elapsedMs: now - (this.initialJumpStartedAt || now),
+                minReadyMs: 250
+            });
+            this.initialJumpStableFrames = readiness.stableFrames;
+            if (readiness.ready) {
+                this.markInitialJumpReady('stable-frames');
+                return;
+            }
+            if (now >= this.initialJumpReadyDeadline) {
+                this.markInitialJumpReady('deadline');
+                return;
+            }
+            this.initialJumpRafId = requestAnimationFrame(tick);
+        };
+
+        this.initialJumpRafId = requestAnimationFrame(tick);
+    }
+
+    queueOrRunTimelineJump(targetId) {
+        const resolved = this.resolvePendingJumpTarget({ targetId });
+        if (!resolved?.targetElement) return;
+        if (!InitialJumpUtils.shouldRunTimelineJump({
+            targetId: resolved.targetId,
+            activeTurnId: this.activeTurnId,
+            initialJumpReady: this.initialJumpReady
+        })) {
+            this.pendingInitialJump = null;
+            return;
+        }
+        this.activeTurnId = resolved.targetId;
+        this.pendingActiveId = null;
+        this.updateActiveDotUI();
+        if (!this.initialJumpReady) {
+            this.pendingInitialJump = { targetId };
+            this.startInitialJumpReadinessWatch();
+            return;
+        }
+        this.pendingInitialJump = null;
+        this.smoothScrollTo(resolved.targetElement);
+    }
+
+    smoothScrollTo(targetElement, duration = 600) {
+        this.cancelSmoothScroll();
+        this.cancelScrollCorrection();
+        this.lockScrollAnchoring();
+        const session = this.smoothScrollSession;
+        const container = this.scrollContainer;
+        const nowBase = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+        this.suppressActiveUntil = nowBase + duration + 1800;
+        const startPosition = this.scrollContainer.scrollTop;
+        const targetPosition = this.getTargetScrollTop(targetElement);
+        if (!Number.isFinite(targetPosition) || Math.abs(targetPosition - startPosition) <= 1) {
+            this.isScrolling = false;
+            this.smoothScrollRafId = null;
+            this.suppressActiveUntil = 0;
+            this.unlockScrollAnchoring();
+            this.scheduleScrollSync();
+            return;
+        }
+        let startTime = null;
         const animation = (currentTime) => {
+            if (session !== this.smoothScrollSession || !this.scrollContainer || this.scrollContainer !== container) return;
             this.isScrolling = true;
             if (startTime === null) startTime = currentTime;
             const timeElapsed = currentTime - startTime;
-            const run = this.easeInOutQuad(timeElapsed, startPosition, distance, duration);
+            const liveTargetPosition = this.getTargetScrollTop(targetElement);
+            const effectiveTarget = Number.isFinite(liveTargetPosition) ? liveTargetPosition : targetPosition;
+            const liveDistance = effectiveTarget - startPosition;
+            const run = this.easeInOutQuad(timeElapsed, startPosition, liveDistance, duration);
             this.scrollContainer.scrollTop = run;
             if (timeElapsed < duration) {
-                requestAnimationFrame(animation);
+                this.smoothScrollRafId = requestAnimationFrame(animation);
             } else {
-                this.scrollContainer.scrollTop = targetPosition;
+                const finalTargetPosition = this.getTargetScrollTop(targetElement);
+                this.scrollContainer.scrollTop = Number.isFinite(finalTargetPosition) ? finalTargetPosition : effectiveTarget;
+                this.correctScrollPositionNow(targetElement, 6);
                 this.isScrolling = false;
+                this.smoothScrollRafId = null;
+                this.beginScrollCorrection(targetElement, {
+                    reason: 'timeline-click'
+                });
             }
         };
-        requestAnimationFrame(animation);
+        this.smoothScrollRafId = requestAnimationFrame(animation);
+    }
+
+    correctScrollPositionNow(targetElement, maxWrites = 6) {
+        if (!this.scrollContainer || !targetElement) return false;
+        let wrote = false;
+        for (let i = 0; i < maxWrites; i++) {
+            const targetTop = this.getTargetScrollTop(targetElement);
+            if (!Number.isFinite(targetTop)) break;
+            const delta = targetTop - this.scrollContainer.scrollTop;
+            if (Math.abs(delta) <= 1) break;
+            this.scrollContainer.scrollTop = targetTop;
+            wrote = true;
+            try { targetElement.getBoundingClientRect(); } catch {}
+        }
+        return wrote;
+    }
+
+    beginScrollCorrection(targetElement, options = {}) {
+        if (!this.scrollContainer || !targetElement) return;
+        this.cancelScrollCorrection();
+        this.lockScrollAnchoring();
+        const session = this.scrollCorrectionSession;
+        const wantedTurnId = String(options.wantedTurnId || targetElement?.closest?.('[data-turn-id]')?.dataset?.turnId || '').trim() || null;
+        const nowBase = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+        const deadline = nowBase + Math.max(400, Number(options.durationMs) || 1800);
+        let stableFrames = 0;
+        this.suppressActiveUntil = deadline;
+
+        const tick = () => {
+            if (session !== this.scrollCorrectionSession || !this.scrollContainer) return;
+            if (!targetElement?.isConnected) {
+                this.scrollCorrectionRafId = null;
+                this.suppressActiveUntil = 0;
+                this.unlockScrollAnchoring();
+                return;
+            }
+            const targetTop = this.getTargetScrollTop(targetElement);
+            if (!Number.isFinite(targetTop)) {
+                this.scrollCorrectionRafId = null;
+                this.suppressActiveUntil = 0;
+                this.unlockScrollAnchoring();
+                return;
+            }
+            const currentTop = this.scrollContainer.scrollTop;
+            const delta = targetTop - currentTop;
+            const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+            const decision = InitialJumpUtils.evaluateScrollCorrection({
+                delta,
+                stableFrames,
+                now,
+                deadline
+            });
+            if (decision.needsWrite) {
+                this.scrollContainer.scrollTop = targetTop;
+                stableFrames = 0;
+            } else {
+                stableFrames++;
+            }
+
+            if (wantedTurnId) {
+                this.activeTurnId = wantedTurnId;
+                this.pendingActiveId = null;
+                this.updateActiveDotUI();
+            }
+            this.refreshMarkerScrollPositions();
+            this.syncTimelineTrackToMain();
+            this.updateVirtualRangeAndRender();
+
+            if (decision.shouldContinue) {
+                this.scrollCorrectionRafId = requestAnimationFrame(tick);
+                return;
+            }
+
+            this.scrollCorrectionRafId = null;
+            this.suppressActiveUntil = 0;
+            this.unlockScrollAnchoring();
+            this.scheduleScrollSync();
+        };
+
+        this.scrollCorrectionRafId = requestAnimationFrame(tick);
     }
     
     easeInOutQuad(t, b, c, d) {
@@ -698,6 +1158,41 @@ class TimelineManager {
         } catch {
             return '';
         }
+    }
+
+    // Trigger the MAIN-world bridge script (fiber-bridge-chatgpt.js) to read React
+    // fiber data for virtualized elements. Data flows back via CustomEvent.detail
+    // into summaryCache — zero DOM modifications, zero traces on the page.
+    extractFiberTexts() {
+        try {
+            let received = false;
+            const handler = (e) => {
+                received = true;
+                const data = e.detail;
+                if (!data || typeof data !== 'object') return;
+                for (const id of Object.keys(data)) {
+                    const text = this.normalizeText(data[id] || '');
+                    if (text) this.summaryCache.set(id, text);
+                }
+            };
+            document.addEventListener('timeline-fiber-result', handler, { once: true });
+            document.dispatchEvent(new CustomEvent('timeline-extract-fiber'));
+            // DOM events are synchronous — if bridge responded, handler already ran.
+            // If not (bridge not loaded yet), clean up the orphaned listener.
+            if (!received) {
+                document.removeEventListener('timeline-fiber-result', handler);
+            }
+        } catch {}
+    }
+
+    // Two-tier summary resolution: DOM text → summaryCache (populated by fiber bridge)
+    resolveSummary(el) {
+        const id = el.dataset.turnId;
+        // Priority 1: DOM text (most reliable when element is not virtualized)
+        const domText = this.normalizeText(el.textContent || '');
+        if (domText) { this.summaryCache.set(id, domText); return domText; }
+        // Priority 2: cached value (filled by fiber bridge or previous DOM reads)
+        return this.summaryCache.get(id) || '';
     }
 
     getTrackPadding() {
@@ -865,8 +1360,13 @@ class TimelineManager {
         const pad = this.getTrackPadding();
         const minGap = this.getMinGap();
         const N = this.markers.length;
-        // Content height ensures minGap between consecutive dots
-        const desired = Math.max(H, (N > 0 ? (2 * pad + Math.max(0, N - 1) * minGap) : H));
+        const markerRatios = this.markers.map(marker => marker.baseN ?? marker.n ?? 0);
+        const desired = InitialJumpUtils.calculateTimelineContentHeight({
+            viewportHeight: H,
+            padding: pad,
+            minGap,
+            markerRatios
+        });
         this.contentHeight = Math.ceil(desired);
         this.scale = (H > 0) ? (this.contentHeight / H) : 1;
         try { this.ui.trackContent.style.height = `${this.contentHeight}px`; } catch {}
@@ -926,9 +1426,14 @@ class TimelineManager {
         if (this.sliderDragging) return; // do not override when user drags slider
         if (!this.ui.track || !this.scrollContainer || !this.contentHeight) return;
         const scrollTop = this.scrollContainer.scrollTop;
-        const ref = scrollTop + this.scrollContainer.clientHeight * 0.45;
-        const span = Math.max(1, this.contentSpanPx || 1);
-        const r = Math.max(0, Math.min(1, (ref - (this.firstUserTurnOffset || 0)) / span));
+        const ref = this.getActiveReferenceY(scrollTop);
+        const livePositions = this.refreshMarkerScrollPositions();
+        const visualRatios = this.markers.map(marker => marker.baseN ?? marker.n ?? 0);
+        const r = InitialJumpUtils.mapLiveReferenceToVisualRatio({
+            livePositions,
+            visualRatios,
+            referenceY: ref
+        });
         const maxScroll = Math.max(0, this.contentHeight - (this.ui.track.clientHeight || 0));
         const target = Math.round(r * maxScroll);
         if (Math.abs((this.ui.track.scrollTop || 0) - target) > 1) {
@@ -979,6 +1484,7 @@ class TimelineManager {
                 dot.dataset.targetTurnId = marker.id;
                 dot.setAttribute('aria-label', marker.summary);
                 dot.setAttribute('tabindex', '0');
+                dot.setAttribute('type', 'button');
                 try { dot.setAttribute('aria-describedby', 'chatgpt-timeline-tooltip'); } catch {}
                 try { dot.style.setProperty('--n', String(marker.n || 0)); } catch {}
                 if (this.usePixelTop) {
@@ -1197,22 +1703,18 @@ class TimelineManager {
 
     computeActiveByScroll() {
         if (!this.scrollContainer || this.markers.length === 0) return;
-        const containerRect = this.scrollContainer.getBoundingClientRect();
+        const nowCheck = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+        if (nowCheck < (this.suppressActiveUntil || 0)) return;
         const scrollTop = this.scrollContainer.scrollTop;
-        const ref = scrollTop + this.scrollContainer.clientHeight * 0.45;
-
-        let activeId = this.markers[0].id;
-        for (let i = 0; i < this.markers.length; i++) {
-            const m = this.markers[i];
-            const top = m.element.getBoundingClientRect().top - containerRect.top + scrollTop;
-            if (top <= ref) {
-                activeId = m.id;
-            } else {
-                break;
-            }
-        }
+        const ref = this.getActiveReferenceY(scrollTop);
+        const positions = this.refreshMarkerScrollPositions();
+        const activeIndex = InitialJumpUtils.selectActiveIndex({
+            positions,
+            referenceY: ref
+        });
+        const activeId = this.markers[activeIndex]?.id || this.markers[0].id;
         if (this.activeTurnId !== activeId) {
-            const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+            const now = nowCheck;
             const since = now - this.lastActiveChangeTime;
             if (since < this.minActiveChangeInterval) {
                 // Coalesce rapid changes during fast scrolling/layout shifts
@@ -1297,6 +1799,9 @@ class TimelineManager {
             try { cancelAnimationFrame(this.scrollRafId); } catch {}
             this.scrollRafId = null;
         }
+        this.cancelSmoothScroll();
+        this.cancelScrollCorrection();
+        this.cancelInitialJumpReadinessWatch();
         try { this.ui.timelineBar?.remove(); } catch {}
         try { this.ui.tooltip?.remove(); } catch {}
         try { this.measureEl?.remove(); } catch {}
@@ -1316,9 +1821,12 @@ class TimelineManager {
         this.ui.sliderHandle = null;
         this.ui = { timelineBar: null, tooltip: null };
         this.markers = [];
+        this.summaryCache.clear();
         this.activeTurnId = null;
         this.scrollContainer = null;
         this.conversationContainer = null;
+        this.initialJumpMetrics = null;
+        this.pendingInitialJump = null;
         this.onTimelineBarClick = null;
         this.onTimelineBarOver = null;
         this.onTimelineBarOut = null;

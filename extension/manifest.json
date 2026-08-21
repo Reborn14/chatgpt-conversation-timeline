@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ChatGPT Conversation Timeline",
-  "version": "3.2.0",
+  "version": "3.3.0",
   "description": "Adds a navigation timeline to your ChatGPT, DeepSeek, Copilot, and Gemini conversations for easy navigation.",
   "action": {
     "default_popup": "popup.html",
@@ -22,8 +22,16 @@
         "https://chatgpt.com/*",
         "https://chat.openai.com/*"
       ],
-      "js": ["content-chatgpt.js"],
+      "js": ["chatgpt-initial-jump-utils.js", "content-chatgpt.js"],
       "css": ["styles-chatgpt.css"]
+    },
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://chat.openai.com/*"
+      ],
+      "js": ["fiber-bridge-chatgpt.js"],
+      "world": "MAIN"
     },
     {
       "matches": [
